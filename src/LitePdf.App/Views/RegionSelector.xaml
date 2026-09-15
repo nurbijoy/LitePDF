@@ -1,0 +1,7 @@
+<UserControl x:Class="LitePdf.App.Views.RegionSelector"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Canvas x:Name="Canvas" Background="Transparent" Cursor="Cross">
+        <Rectangle x:Name="SelectionRect" Stroke="DodgerBlue" StrokeThickness="1" Fill="#33007ACC" Visibility="Collapsed"/>
+    </Canvas>
+</UserControl>

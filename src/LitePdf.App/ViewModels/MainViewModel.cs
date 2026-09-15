@@ -591,4 +591,69 @@ public sealed class MainViewModel : ObservableObject
         var page = Pages[CurrentPageIndex].PageSize;
         return ViewMath.FitPage(viewportWidthDip, viewportHeightDip, page, hChrome, vChrome);
     }
+
+    // Comfort features (stubs for T-62..T-69)
+
+    private bool _isFullScreen;
+    public bool IsFullScreen
+    {
+        get => _isFullScreen;
+        set => SetProperty(ref _isFullScreen, value);
+    }
+
+    private int _rotation = 0; // 0,90,180,270
+    public int Rotation
+    {
+        get => _rotation;
+        set => SetProperty(ref _rotation, value % 360);
+    }
+
+    private bool _twoPageView;
+    public bool TwoPageView
+    {
+        get => _twoPageView;
+        set => SetProperty(ref _twoPageView, value);
+    }
+
+    private PageMode _pageMode = PageMode.Normal;
+    public PageMode PageMode
+    {
+        get => _pageMode;
+        set => SetProperty(ref _pageMode, value);
+    }
+
+    public enum PageMode { Normal, Dark, Sepia }
+
+    public void ToggleFullScreen()
+    {
+        IsFullScreen = !IsFullScreen;
+    }
+
+    public void RotateClockwise()
+    {
+        Rotation = (Rotation + 90) % 360;
+        // In real implementation, page sizes would swap width/height for 90/270
+    }
+
+    public void ExportHighlightsToMarkdown(string path)
+    {
+        try
+        {
+            var lines = new List<string> { "# Highlights from " + FileName, "" };
+            foreach (var ann in Annotations.OrderBy(a => a.PageIndex))
+            {
+                lines.Add($"## Page {ann.PageIndex + 1}");
+                lines.Add($"- \"{ann.Text}\" ({ann.ColorName})");
+                if (!string.IsNullOrWhiteSpace(ann.Contents))
+                    lines.Add($"  Note: {ann.Contents}");
+                lines.Add("");
+            }
+            File.WriteAllLines(path, lines);
+            StatusText = $"Exported to {path}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Export failed: {ex.Message}";
+        }
+    }
 }
