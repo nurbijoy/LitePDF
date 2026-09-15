@@ -7,19 +7,22 @@ public interface IOcrEngine
     /// <summary>BCP-47 tags of installed recognizer languages, e.g. "en-US".</summary>
     IReadOnlyList<string> AvailableLanguages { get; }
 
-    /// <summary>Largest width or height accepted by <see cref="RecognizeAsync"/>.</summary>
+    /// <summary>Largest width or height accepted by <see cref="RecognizeAsync"/>; larger images are downscaled.</summary>
     int MaxImageDimension { get; }
 
-    /// <param name="languageTag">Null uses the user's profile language, falling back to the first installed one.</param>
+    /// <param name="languageTag">Null or empty picks the user's profile language, then the first installed one.</param>
     Task<OcrPageResult> RecognizeAsync(RenderedBitmap bitmap, string? languageTag, CancellationToken ct = default);
 }
 
-/// <summary>A recognized word. PixelRect is in bitmap pixels, top-left origin (Top &lt; Bottom).</summary>
-public sealed record OcrWord(string Text, RectD PixelRect);
+/// <summary>A recognized word; Bounds are normalized to the recognized bitmap (0..1, top-left origin).</summary>
+public sealed record OcrWord(string Text, RectD Bounds);
 
-public sealed record OcrLine(string Text, IReadOnlyList<OcrWord> Words);
+public sealed record OcrLine(IReadOnlyList<OcrWord> Words)
+{
+    public string Text => string.Join(' ', Words.Select(w => w.Text));
+}
 
-public sealed record OcrPageResult(string LanguageTag, double? TextAngle, IReadOnlyList<OcrLine> Lines)
+public sealed record OcrPageResult(string LanguageTag, IReadOnlyList<OcrLine> Lines)
 {
     public string Text => string.Join(Environment.NewLine, Lines.Select(l => l.Text));
 }

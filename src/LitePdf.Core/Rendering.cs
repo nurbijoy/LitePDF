@@ -1,9 +1,12 @@
 namespace LitePdf.Core;
 
-/// <summary>BGRA32 pixels, top-left origin. The alpha byte is undefined; treat the bitmap as opaque (Bgr32).</summary>
-public sealed record RenderedBitmap(int Width, int Height, int Stride, byte[] Pixels);
+/// <summary>Tightly packed BGRA32 pixels (Stride == Width * 4), top-left origin, opaque.</summary>
+public sealed record RenderedBitmap(int Width, int Height, byte[] Pixels)
+{
+    public int Stride => Width * 4;
+}
 
-/// <summary>Values match PDFium's FPDF_RENDER flags so they can be passed straight through.</summary>
+/// <summary>Values match PDFium's FPDF_RENDER flags so they pass straight through.</summary>
 [Flags]
 public enum RenderFlags
 {
@@ -13,7 +16,7 @@ public enum RenderFlags
     Printing = 0x800,
 }
 
-/// <summary>Work queue priorities; lower runs first. See BLUEPRINT §4.</summary>
+/// <summary>Work queue priorities; lower runs first.</summary>
 public static class RenderPriority
 {
     public const int Visible = 0;
@@ -21,4 +24,11 @@ public static class RenderPriority
     public const int Nearby = 20;
     public const int Thumbnail = 30;
     public const int Background = 40;
+}
+
+public enum PageColorMode
+{
+    Normal,
+    Dark,
+    Sepia,
 }

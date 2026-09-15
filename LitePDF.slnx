@@ -5,6 +5,9 @@
     <Project Path="src/LitePdf.Ocr/LitePdf.Ocr.csproj" />
     <Project Path="src/LitePdf.Pdfium/LitePdf.Pdfium.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/LitePdf.SampleGen/LitePdf.SampleGen.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/LitePdf.Core.Tests/LitePdf.Core.Tests.csproj" />
   </Folder>

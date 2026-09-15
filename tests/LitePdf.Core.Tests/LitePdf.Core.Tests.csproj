@@ -13,6 +13,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="..\..\tools\LitePdf.SampleGen\SamplePdfBuilder.cs" Link="Shared\SamplePdfBuilder.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Using Include="Xunit" />
   </ItemGroup>
 

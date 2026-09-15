@@ -1,27 +1,33 @@
 namespace LitePdf.Pdfium;
 
+/// <summary>PDFium FPDF_ERR_* codes.</summary>
+public enum PdfiumError
+{
+    Unknown = 1,
+    File = 2,
+    Format = 3,
+    Password = 4,
+    Security = 5,
+    Page = 6,
+}
+
 public sealed class PdfiumException : Exception
 {
-    public int ErrorCode { get; }
-
-    public PdfiumException(int errorCode, string message) : base(message)
+    public PdfiumException(PdfiumError error, string message, Exception? inner = null)
+        : base(message, inner)
     {
-        ErrorCode = errorCode;
+        Error = error;
     }
 
-    public PdfiumException(int errorCode, string message, Exception inner) : base(message, inner)
-    {
-        ErrorCode = errorCode;
-    }
+    public PdfiumError Error { get; }
 
-    public static string MessageForError(int code) => code switch
+    internal static PdfiumException FromLastError(uint code) => (PdfiumError)code switch
     {
-        1 => "Unknown error.",
-        2 => "File not found or could not be opened.",
-        3 => "This file is not a valid PDF or is damaged.",
-        4 => "Password required or incorrect password.",
-        5 => "Unsupported security handler.",
-        6 => "Page not found or content error.",
-        _ => $"PDFium error {code}."
+        PdfiumError.File => new(PdfiumError.File, "The file could not be opened."),
+        PdfiumError.Format => new(PdfiumError.Format, "This file is not a valid PDF or is damaged."),
+        PdfiumError.Password => new(PdfiumError.Password, "This document is protected by a password."),
+        PdfiumError.Security => new(PdfiumError.Security, "This document uses an unsupported security handler."),
+        PdfiumError.Page => new(PdfiumError.Page, "The page could not be loaded."),
+        _ => new(PdfiumError.Unknown, "The document could not be opened."),
     };
 }

@@ -1,152 +1,115 @@
-using System.Collections.Concurrent;
+using LitePdf.Pdfium.Interop;
 
 namespace LitePdf.Pdfium;
 
 /// <summary>
-/// Single-threaded worker that serializes all PDFium calls.
-/// Implements priority queue (lower value = higher priority).
-/// See BLUEPRINT §4.
+/// PDFium is not thread-safe: every native call runs on this one dedicated thread, in priority order
+/// (lower value first, FIFO within a priority). Cancelled items complete immediately and are skipped.
 /// </summary>
-public sealed class PdfiumWorker : IDisposable
+public sealed class PdfiumWorker
 {
-    private sealed class WorkItem
-    {
-        public Func<CancellationToken, object?> Func = null!;
-        public TaskCompletionSource<object?> Tcs = null!;
-        public CancellationToken Ct;
-        public int Priority;
-        public long Seq;
-    }
+    private static readonly Lazy<PdfiumWorker> LazyInstance = new(() => new PdfiumWorker());
 
-    private readonly Thread _thread;
-    private readonly PriorityQueue<WorkItem, (int priority, long seq)> _queue = new();
-    private readonly object _lock = new();
-    private long _seq;
-    private bool _disposed;
-    private readonly ManualResetEventSlim _signal = new(false);
-    private readonly TaskCompletionSource _initTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-    public static PdfiumWorker Instance { get; } = new PdfiumWorker();
+    private readonly PriorityQueue<WorkItem, (int Priority, long Sequence)> _queue = new();
+    private readonly object _gate = new();
+    private long _sequence;
+    private Exception? _initError;
 
     private PdfiumWorker()
     {
-        _thread = new Thread(WorkerLoop)
-        {
-            IsBackground = true,
-            Name = "PDFium"
-        };
-        _thread.Start();
-        // Wait for init to complete synchronously? We do async init via task.
-        // Ensure FPDF_InitLibrary runs on worker thread before any other work.
-        _initTcs.Task.Wait(5000);
+        var thread = new Thread(Run) { IsBackground = true, Name = "PDFium worker" };
+        thread.Start();
     }
 
-    private void WorkerLoop()
+    public static PdfiumWorker Instance => LazyInstance.Value;
+
+    public int ManagedThreadId { get; private set; }
+
+    public Task<T> RunAsync<T>(Func<T> work, int priority, CancellationToken ct = default)
     {
+        if (ct.IsCancellationRequested) return Task.FromCanceled<T>(ct);
+        var item = new WorkItem<T>(work, ct);
+        lock (_gate)
+        {
+            _queue.Enqueue(item, (priority, _sequence++));
+            Monitor.Pulse(_gate);
+        }
+        return item.Task;
+    }
+
+    public Task RunAsync(Action work, int priority, CancellationToken ct = default) =>
+        RunAsync(() => { work(); return true; }, priority, ct);
+
+    private void Run()
+    {
+        ManagedThreadId = Environment.CurrentManagedThreadId;
         try
         {
             NativeMethods.FPDF_InitLibrary();
-            _initTcs.TrySetResult();
         }
         catch (Exception ex)
         {
-            _initTcs.TrySetException(ex);
-            return;
+            _initError = new InvalidOperationException("The PDF engine (pdfium.dll) could not be loaded.", ex);
         }
 
         while (true)
         {
-            WorkItem? item = null;
-            lock (_lock)
+            WorkItem item;
+            lock (_gate)
             {
-                if (_queue.Count > 0)
-                {
-                    item = _queue.Dequeue();
-                }
-                else
-                {
-                    if (_disposed) break;
-                }
+                while (_queue.Count == 0) Monitor.Wait(_gate);
+                item = _queue.Dequeue();
             }
+            item.Execute(_initError);
+        }
+    }
 
-            if (item == null)
-            {
-                _signal.Wait(100);
-                _signal.Reset();
-                lock (_lock)
-                {
-                    if (_disposed && _queue.Count == 0) break;
-                }
-                continue;
-            }
+    private abstract class WorkItem
+    {
+        public abstract void Execute(Exception? initError);
+    }
 
-            if (item.Ct.IsCancellationRequested)
-            {
-                item.Tcs.TrySetCanceled(item.Ct);
-                continue;
-            }
+    private sealed class WorkItem<T> : WorkItem
+    {
+        private readonly Func<T> _work;
+        private readonly CancellationToken _ct;
+        private readonly TaskCompletionSource<T> _tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly CancellationTokenRegistration _registration;
 
+        public WorkItem(Func<T> work, CancellationToken ct)
+        {
+            _work = work;
+            _ct = ct;
+            if (ct.CanBeCanceled)
+                _registration = ct.Register(static s => ((WorkItem<T>)s!)._tcs.TrySetCanceled(((WorkItem<T>)s!)._ct), this);
+        }
+
+        public Task<T> Task => _tcs.Task;
+
+        public override void Execute(Exception? initError)
+        {
             try
             {
-                var result = item.Func(item.Ct);
-                item.Tcs.TrySetResult(result);
+                if (_tcs.Task.IsCompleted) return;
+                if (initError is not null)
+                {
+                    _tcs.TrySetException(initError);
+                    return;
+                }
+                _tcs.TrySetResult(_work());
             }
-            catch (OperationCanceledException oce) when (oce.CancellationToken == item.Ct || item.Ct.IsCancellationRequested)
+            catch (OperationCanceledException) when (_ct.IsCancellationRequested)
             {
-                item.Tcs.TrySetCanceled(item.Ct);
+                _tcs.TrySetCanceled(_ct);
             }
             catch (Exception ex)
             {
-                item.Tcs.TrySetException(ex);
+                _tcs.TrySetException(ex);
+            }
+            finally
+            {
+                _registration.Dispose();
             }
         }
-
-        try { NativeMethods.FPDF_DestroyLibrary(); } catch { }
-    }
-
-    public Task<T> RunAsync<T>(Func<CancellationToken, T> func, int priority, CancellationToken ct = default)
-    {
-        if (_disposed) throw new ObjectDisposedException(nameof(PdfiumWorker));
-
-        var tcs = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var item = new WorkItem
-        {
-            Func = c => func(c),
-            Tcs = tcs,
-            Ct = ct,
-            Priority = priority,
-            Seq = Interlocked.Increment(ref _seq)
-        };
-
-        lock (_lock)
-        {
-            _queue.Enqueue(item, (priority, item.Seq));
-        }
-        _signal.Set();
-
-        // Convert to Task<T>
-        return tcs.Task.ContinueWith(t =>
-        {
-            if (t.IsCanceled) throw new OperationCanceledException(ct);
-            if (t.IsFaulted) throw t.Exception!.InnerException!;
-            return (T)t.Result!;
-        }, ct, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-    }
-
-    public Task<T> RunAsync<T>(Func<T> func, int priority, CancellationToken ct = default)
-        => RunAsync(_ => func(), priority, ct);
-
-    public void Dispose()
-    {
-        lock (_lock)
-        {
-            _disposed = true;
-        }
-        _signal.Set();
-        if (Thread.CurrentThread != _thread)
-        {
-            _thread.Join(2000);
-        }
-        _signal.Dispose();
     }
 }
