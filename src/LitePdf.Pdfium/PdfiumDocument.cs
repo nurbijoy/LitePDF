@@ -694,6 +694,42 @@ public sealed class PdfiumDocument : IPdfDocument
     }
 
     // For same-file incremental save, we need a method that closes and reopens
+    public Task<(bool success, int deviceX, int deviceY)> PageToDeviceAsync(int pageIndex, double pageX, double pageY, int startX, int startY, int sizeX, int sizeY, int rotate, CancellationToken ct = default)
+    {
+        return PdfiumWorker.Instance.RunAsync(() =>
+        {
+            IntPtr page = NativeMethods.FPDF_LoadPage(_doc, pageIndex);
+            if (page == IntPtr.Zero) return (false, 0, 0);
+            try
+            {
+                bool ok = NativeMethods.FPDF_PageToDevice(page, startX, startY, sizeX, sizeY, rotate, pageX, pageY, out int dx, out int dy);
+                return (ok, dx, dy);
+            }
+            finally
+            {
+                NativeMethods.FPDF_ClosePage(page);
+            }
+        }, RenderPriority.Interactive, ct);
+    }
+
+    public Task<(bool success, double pageX, double pageY)> DeviceToPageAsync(int pageIndex, int deviceX, int deviceY, int startX, int startY, int sizeX, int sizeY, int rotate, CancellationToken ct = default)
+    {
+        return PdfiumWorker.Instance.RunAsync(() =>
+        {
+            IntPtr page = NativeMethods.FPDF_LoadPage(_doc, pageIndex);
+            if (page == IntPtr.Zero) return (false, 0, 0);
+            try
+            {
+                bool ok = NativeMethods.FPDF_DeviceToPage(page, startX, startY, sizeX, sizeY, rotate, deviceX, deviceY, out double px, out double py);
+                return (ok, px, py);
+            }
+            finally
+            {
+                NativeMethods.FPDF_ClosePage(page);
+            }
+        }, RenderPriority.Interactive, ct);
+    }
+
     public Task<bool> SaveIncrementalToSameFileAsync(CancellationToken ct = default)
     {
         // This must be called from UI thread, but does worker work then file replace
@@ -752,8 +788,5 @@ public sealed class PdfiumDocument : IPdfDocument
     }
 }
 
-// Additional types for links and annotations
-
-public sealed record PdfLink(RectD Rect, int DestPageIndex, string? Uri);
-
+// Additional types for annotations (PdfLink now in Core)
 public sealed record AnnotationInfo(int Index, int Subtype, RectD Rect, IReadOnlyList<RectD> Quads, byte R, byte G, byte B, string Contents);

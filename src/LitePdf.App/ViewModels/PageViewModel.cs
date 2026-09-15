@@ -49,8 +49,8 @@ public sealed class PageViewModel : ObservableObject
     }
 
     // Links
-    private IReadOnlyList<Pdfium.PdfLink> _links = Array.Empty<Pdfium.PdfLink>();
-    public IReadOnlyList<Pdfium.PdfLink> Links
+    private IReadOnlyList<Core.PdfLink> _links = Array.Empty<Core.PdfLink>();
+    public IReadOnlyList<Core.PdfLink> Links
     {
         get => _links;
         set => SetProperty(ref _links, value);

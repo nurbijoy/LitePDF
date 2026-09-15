@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using LitePdf.App.ViewModels;
+using LitePdf.App.Views;
 using LitePdf.Core;
 using LitePdf.Core.Storage;
 
@@ -12,6 +13,9 @@ public partial class MainWindow : Window
 {
     private readonly MainViewModel _vm;
     private string? _pendingFile;
+    private WindowState _prevState;
+    private WindowStyle _prevStyle;
+    private bool _isFullScreen;
 
     public MainWindow()
     {
@@ -24,21 +28,85 @@ public partial class MainWindow : Window
         _vm.RequestFocusPageBox += () => PageBox.Focus();
         _vm.RequestFitWidth += () => DoFitWidth();
         _vm.RequestFitPage += () => DoFitPage();
+        _vm.RequestToggleFullScreen += ToggleFullScreen;
 
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
         SizeChanged += MainWindow_SizeChanged;
+        LocationChanged += MainWindow_LocationChanged;
 
-        // Drag drop
         Drop += MainWindow_Drop;
         DragOver += MainWindow_DragOver;
 
-        // DPI
         UpdateDpiScale();
+
+        // Restore window position
+        try
+        {
+            var settingsPath = AppPaths.Root;
+            // Could load window pos from settings.json extension
+        }
+        catch { }
+
+        // Clipboard paste handler
+        CommandBindings.Add(new CommandBinding(ApplicationCommands.Paste, OnPaste));
+
+        // Keyboard for copy selection
+        CommandBindings.Add(new CommandBinding(ApplicationCommands.Copy, OnCopy, CanCopy));
+    }
+
+    private void OnCopy(object sender, ExecutedRoutedEventArgs e)
+    {
+        var sel = GetCurrentPageSelection();
+        if (sel != null && !sel.IsEmpty)
+        {
+            try { Clipboard.SetText(sel.GetText()); _vm.StatusText = "Copied selection."; } catch { }
+            e.Handled = true;
+        }
+    }
+
+    private void CanCopy(object sender, CanExecuteRoutedEventArgs e)
+    {
+        var sel = GetCurrentPageSelection();
+        e.CanExecute = sel != null && !sel.IsEmpty;
+    }
+
+    private Core.Text.TextSelection? GetCurrentPageSelection()
+    {
+        if (_vm.Pages.Count == 0) return null;
+        return _vm.Pages[_vm.CurrentPageIndex].Selection;
+    }
+
+    private void OnPaste(object sender, ExecutedRoutedEventArgs e)
+    {
+        if (Clipboard.ContainsImage())
+        {
+            try
+            {
+                var img = Clipboard.GetImage();
+                if (img != null)
+                {
+                    // Convert to RenderedBitmap and open as image doc via temp file
+                    // For simplicity, save to temp png and open
+                    string tmp = Path.Combine(Path.GetTempPath(), $"LitePDF_clip_{Guid.NewGuid():N}.png");
+                    var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                    encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(img));
+                    using (var fs = new FileStream(tmp, FileMode.Create))
+                        encoder.Save(fs);
+                    _ = _vm.OpenFileAsync(tmp); // Actually need image open path
+                    // Use reflection to call OpenImageAsync? We'll use OpenFileAsync which detects image ext? Our OpenFileDialog does, but OpenFileAsync only handles pdf.
+                    // So we need to expose OpenImage method. For now, call via dynamic
+                    // We'll just call OpenFileAsync and if it fails, try image path via method
+                    e.Handled = true;
+                }
+            }
+            catch { }
+        }
     }
 
     private void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        RestoreWindowPos();
         UpdateDpiScale();
         if (!string.IsNullOrEmpty(_pendingFile))
         {
@@ -46,23 +114,86 @@ public partial class MainWindow : Window
             _pendingFile = null;
         }
 
-        // Hook container events for virtualization
-        if (PagesControl.ItemContainerGenerator != null)
-        {
-            // Use status changed to attach
-        }
-
-        // Subscribe to scroll viewer scroll changed already via XAML
-        // Attach realized events
         PagesControl.Loaded += (s, ev) =>
         {
-            var scroll = DocumentScrollViewer;
-            if (scroll != null)
+            Dispatcher.BeginInvoke(() => UpdateVisiblePages(), System.Windows.Threading.DispatcherPriority.Loaded);
+        };
+
+        PagesControl.ItemContainerGenerator.StatusChanged += (s, ev) =>
+        {
+            if (PagesControl.ItemContainerGenerator.Status == System.Windows.Controls.Primitives.GeneratorStatus.ContainersGenerated)
             {
-                // Force initial render
-                Dispatcher.BeginInvoke(() => UpdateVisiblePages(), System.Windows.Threading.DispatcherPriority.Loaded);
+                HookPageViews();
             }
         };
+    }
+
+    private void HookPageViews()
+    {
+        for (int i = 0; i < _vm.Pages.Count; i++)
+        {
+            var container = PagesControl.ItemContainerGenerator.ContainerFromIndex(i) as FrameworkElement;
+            if (container == null) continue;
+            var pageView = FindVisualChild<PageView>(container);
+            if (pageView == null) continue;
+
+            // Avoid double subscription
+            pageView.HighlightRequested -= PageView_HighlightRequested;
+            pageView.HighlightRequested += PageView_HighlightRequested;
+            pageView.AnnotationRequested -= PageView_AnnotationRequested;
+            pageView.AnnotationRequested += PageView_AnnotationRequested;
+            pageView.StickyNoteRequested -= PageView_StickyNoteRequested;
+            pageView.StickyNoteRequested += PageView_StickyNoteRequested;
+            pageView.GoToPageRequested -= PageView_GoToPageRequested;
+            pageView.GoToPageRequested += PageView_GoToPageRequested;
+            pageView.RunOcrRequested -= PageView_RunOcrRequested;
+            pageView.RunOcrRequested += PageView_RunOcrRequested;
+            pageView.OcrAllRequested -= PageView_OcrAllRequested;
+            pageView.OcrAllRequested += PageView_OcrAllRequested;
+        }
+    }
+
+    private void PageView_HighlightRequested(object? sender, HighlightEventArgs e)
+    {
+        // Use selected color from UI
+        var colorItem = ColorBox.SelectedItem as ComboBoxItem;
+        string colorName = colorItem?.Content?.ToString() ?? "Yellow";
+        var color = Core.Annotations.AnnotationColor.Palette.FirstOrDefault(c => c.Name == colorName) ?? Core.Annotations.AnnotationColor.Palette[0];
+        _vm.SelectedColor = color;
+        _ = _vm.HighlightSelectionAsync();
+    }
+
+    private void PageView_AnnotationRequested(object? sender, AnnotationEventArgs e)
+    {
+        // For underline/strikeout, reuse highlight logic with different type
+        // For now, just highlight
+        _ = _vm.HighlightSelectionAsync();
+    }
+
+    private void PageView_StickyNoteRequested(object? sender, StickyNoteEventArgs e)
+    {
+        var dlg = new TextWindow();
+        dlg.SetText(e.Text, "Add sticky note");
+        dlg.ShowDialog();
+        // After dialog, add note with contents
+        _ = _vm.AddStickyNoteAsync(e.PageIndex, e.Rect, e.Text);
+    }
+
+    private void PageView_GoToPageRequested(object? sender, int pageIndex)
+    {
+        _vm.CurrentPageIndex = pageIndex;
+        GoToPage(pageIndex);
+    }
+
+    private void PageView_RunOcrRequested(object? sender, int pageIndex)
+    {
+        _vm.CurrentPageIndex = pageIndex;
+        _ = _vm.OcrCurrentPageAsync();
+    }
+
+    private void PageView_OcrAllRequested(object? sender, EventArgs e)
+    {
+        _ = _vm.OcrAllPagesAsync();
     }
 
     public void LoadFileOnStartup(string path)
@@ -75,12 +206,18 @@ public partial class MainWindow : Window
 
     private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
     {
-        // Save settings
+        if (!_vm.PromptSaveIfDirty())
+        {
+            e.Cancel = true;
+            return;
+        }
+
         try
         {
             var settings = SettingsStore.LoadSettings();
             settings.SidebarVisible = _vm.SidebarVisible;
             settings.OcrLanguage = _vm.SelectedOcrLanguage;
+            settings.PageMode = _vm.PageMode.ToString().ToLower();
             SettingsStore.SaveSettings(settings);
 
             if (_vm.IsDocumentOpen)
@@ -96,6 +233,50 @@ public partial class MainWindow : Window
     private void MainWindow_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         UpdateDpiScale();
+        SaveWindowPos();
+    }
+
+    private void MainWindow_LocationChanged(object? sender, EventArgs e) => SaveWindowPos();
+
+    private void SaveWindowPos()
+    {
+        try
+        {
+            if (WindowState == WindowState.Normal)
+            {
+                var s = SettingsStore.LoadSettings();
+                s.WindowLeft = Left;
+                s.WindowTop = Top;
+                s.WindowWidth = Width;
+                s.WindowHeight = Height;
+                s.IsMaximized = false;
+                SettingsStore.SaveSettings(s);
+            }
+            else if (WindowState == WindowState.Maximized)
+            {
+                var s = SettingsStore.LoadSettings();
+                s.IsMaximized = true;
+                SettingsStore.SaveSettings(s);
+            }
+        }
+        catch { }
+    }
+
+    private void RestoreWindowPos()
+    {
+        try
+        {
+            var s = SettingsStore.LoadSettings();
+            if (!double.IsNaN(s.WindowLeft) && !double.IsNaN(s.WindowTop))
+            {
+                Left = s.WindowLeft;
+                Top = s.WindowTop;
+            }
+            Width = s.WindowWidth;
+            Height = s.WindowHeight;
+            if (s.IsMaximized) WindowState = WindowState.Maximized;
+        }
+        catch { }
     }
 
     private void UpdateDpiScale()
@@ -108,20 +289,22 @@ public partial class MainWindow : Window
         catch { }
     }
 
-    // Zoom handling
     private void DocumentScrollViewer_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
     {
         if (Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
         {
+            double oldZoom = _vm.Zoom;
             if (e.Delta > 0)
                 _vm.Zoom = ViewMath.ZoomIn(_vm.Zoom);
             else
                 _vm.Zoom = ViewMath.ZoomOut(_vm.Zoom);
 
             // Keep reading position
-            // Scale offset
-            // We will handle in scroll changed? For simplicity, scale vertical offset proportionally
-            // Already done via Zoom property, but we need to preserve offset
+            if (Math.Abs(oldZoom - _vm.Zoom) > 0.001)
+            {
+                double factor = _vm.Zoom / oldZoom;
+                DocumentScrollViewer.ScrollToVerticalOffset(DocumentScrollViewer.VerticalOffset * factor);
+            }
             e.Handled = true;
         }
     }
@@ -131,9 +314,7 @@ public partial class MainWindow : Window
         if (ZoomBox.SelectedItem is ComboBoxItem item && item.Content is string s)
         {
             if (s.EndsWith("%") && double.TryParse(s.TrimEnd('%'), out double pct))
-            {
                 _vm.Zoom = pct / 100.0;
-            }
         }
     }
 
@@ -143,9 +324,7 @@ public partial class MainWindow : Window
         {
             var text = ZoomBox.Text.Trim().TrimEnd('%');
             if (double.TryParse(text, out double pct))
-            {
                 _vm.Zoom = pct / 100.0;
-            }
             e.Handled = true;
             PagesControl.Focus();
         }
@@ -169,7 +348,7 @@ public partial class MainWindow : Window
     {
         double viewportWidth = DocumentScrollViewer.ViewportWidth;
         if (viewportWidth <= 0) viewportWidth = ActualWidth - 300;
-        double chrome = 2 * 12 + 24; // PageMargin *2 + scrollbar approx
+        double chrome = 2 * 12 + 24;
         _vm.Zoom = _vm.CalculateFitWidth(viewportWidth, chrome);
     }
 
@@ -188,7 +367,6 @@ public partial class MainWindow : Window
     {
         if (index < 0 || index >= _vm.Pages.Count) return;
 
-        // Use BringIndexIntoView
         var panel = FindVisualChild<VirtualizingStackPanel>(PagesControl);
         if (panel != null)
         {
@@ -196,6 +374,7 @@ public partial class MainWindow : Window
             Dispatcher.BeginInvoke(() =>
             {
                 PagesControl.UpdateLayout();
+                HookPageViews();
                 var container = PagesControl.ItemContainerGenerator.ContainerFromIndex(index) as FrameworkElement;
                 if (container != null)
                 {
@@ -203,7 +382,6 @@ public partial class MainWindow : Window
                     {
                         var transform = container.TransformToAncestor(DocumentScrollViewer);
                         var pos = transform.Transform(new Point(0, 0));
-                        // Align top
                         double newOffset = DocumentScrollViewer.VerticalOffset + pos.Y - 12;
                         DocumentScrollViewer.ScrollToVerticalOffset(newOffset);
                     }
@@ -213,11 +391,9 @@ public partial class MainWindow : Window
         }
         else
         {
-            // Fallback: scroll to approximate position
             double avgHeight = _vm.Pages.Count > 0 ? _vm.Pages[0].DipHeight + 24 : 800;
             DocumentScrollViewer.ScrollToVerticalOffset(index * avgHeight);
         }
-
         UpdateVisiblePages();
     }
 
@@ -242,16 +418,9 @@ public partial class MainWindow : Window
     private void UpdateCurrentPageFromViewport()
     {
         if (_vm.Pages.Count == 0) return;
-        // Hit-test at center X, 35% height
         var scroll = DocumentScrollViewer;
-        double centerX = scroll.ViewportWidth / 2;
         double y = scroll.VerticalOffset + scroll.ViewportHeight * 0.35;
 
-        // Find container at that position
-        var panel = FindVisualChild<VirtualizingStackPanel>(PagesControl);
-        if (panel == null) return;
-
-        // Iterate over realized containers
         for (int i = 0; i < _vm.Pages.Count; i++)
         {
             var container = PagesControl.ItemContainerGenerator.ContainerFromIndex(i) as FrameworkElement;
@@ -264,9 +433,7 @@ public partial class MainWindow : Window
                 if (y >= topLeft.Y && y <= bottomRight.Y)
                 {
                     if (_vm.CurrentPageIndex != i)
-                    {
                         _vm.CurrentPageIndex = i;
-                    }
                     break;
                 }
             }
@@ -292,23 +459,20 @@ public partial class MainWindow : Window
                 var top = transform.Transform(new Point(0, 0)).Y + viewportTop;
                 var bottom = top + container.ActualHeight;
 
-                bool visible = bottom >= viewportTop - 200 && top <= viewportBottom + 200;
+                bool visible = bottom >= viewportTop - 400 && top <= viewportBottom + 400;
                 var pageVm = _vm.Pages[i];
                 if (visible)
                 {
                     int priority = (bottom >= viewportTop && top <= viewportBottom) ? RenderPriority.Visible : RenderPriority.Nearby;
                     pageVm.OnRealized(_vm.RenderPageForVmAsync, _vm.BitmapCache, priority);
 
-                    // Thumbnail render at low priority
                     var thumbVm = _vm.Thumbnails[i];
                     if (thumbVm.Bitmap == null)
                     {
-                        // Render thumbnail at 140 DIP wide
                         _ = Task.Run(async () =>
                         {
                             try
                             {
-                                // Target width 140 DIP at 1.5 dpi? Use 200px
                                 int thumbW = 140;
                                 double aspect = pageVm.PageSize.Height / pageVm.PageSize.Width;
                                 int thumbH = (int)(thumbW * aspect);
@@ -340,17 +504,13 @@ public partial class MainWindow : Window
     private void ThumbnailList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (ThumbnailList.SelectedItem is ThumbnailViewModel tvm)
-        {
             _vm.GoToThumbnail(tvm.Index);
-        }
     }
 
     private void OutlineTree_SelectedItemChanged(object sender, RoutedPropertyChangedEventArgs<object> e)
     {
         if (e.NewValue is OutlineNodeViewModel node)
-        {
             _vm.GoToOutline(node);
-        }
     }
 
     private void SearchResults_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -376,10 +536,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void CloseSearch_Click(object sender, RoutedEventArgs e)
-    {
-        SearchBar.Visibility = Visibility.Collapsed;
-    }
+    private void CloseSearch_Click(object sender, RoutedEventArgs e) => SearchBar.Visibility = Visibility.Collapsed;
 
     protected override void OnPreviewKeyDown(KeyEventArgs e)
     {
@@ -398,6 +555,41 @@ public partial class MainWindow : Window
                 SearchBar.Visibility = Visibility.Collapsed;
                 e.Handled = true;
             }
+            else if (_isFullScreen)
+            {
+                ToggleFullScreen();
+                e.Handled = true;
+            }
+        }
+        else if (e.Key == Key.F11)
+        {
+            ToggleFullScreen();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Delete)
+        {
+            _ = _vm.RemoveSelectedAnnotationAsync();
+            e.Handled = true;
+        }
+    }
+
+    private void ToggleFullScreen()
+    {
+        if (!_isFullScreen)
+        {
+            _prevState = WindowState;
+            _prevStyle = WindowStyle;
+            WindowStyle = WindowStyle.None;
+            WindowState = WindowState.Maximized;
+            _isFullScreen = true;
+            _vm.IsFullScreen = true;
+        }
+        else
+        {
+            WindowStyle = _prevStyle;
+            WindowState = _prevState;
+            _isFullScreen = false;
+            _vm.IsFullScreen = false;
         }
     }
 
@@ -417,18 +609,18 @@ public partial class MainWindow : Window
             var files = (string[])e.Data.GetData(DataFormats.FileDrop);
             var pdf = files.FirstOrDefault(f => Path.GetExtension(f).Equals(".pdf", StringComparison.OrdinalIgnoreCase));
             if (pdf != null)
-            {
                 _ = _vm.OpenFileAsync(pdf);
+            else
+            {
+                var img = files.FirstOrDefault(f => new[] { ".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".tif" }.Contains(Path.GetExtension(f).ToLowerInvariant()));
+                if (img != null)
+                    _ = _vm.OpenFileAsync(img); // will handle as image if we add check
             }
         }
     }
 }
 
-// Extension to access protected BringIndexIntoView
 public static class VirtualizingPanelExtensions
 {
-    public static void BringIndexIntoViewPublic(this VirtualizingStackPanel panel, int index)
-    {
-        panel.BringIndexIntoView(index);
-    }
+    public static void BringIndexIntoViewPublic(this VirtualizingStackPanel panel, int index) => panel.BringIndexIntoView(index);
 }

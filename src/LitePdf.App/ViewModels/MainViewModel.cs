@@ -1,7 +1,12 @@
 using System.Collections.ObjectModel;
+using System.Diagnostics;
+using System.IO;
 using System.Windows;
+using System.Windows.Media.Imaging;
 using LitePdf.App.Services;
+using LitePdf.App.Views;
 using LitePdf.Core;
+using LitePdf.Core.Annotations;
 using LitePdf.Core.Search;
 using LitePdf.Core.Storage;
 using LitePdf.Core.Text;
@@ -18,6 +23,7 @@ public sealed class MainViewModel : ObservableObject
     private string _filePath = string.Empty;
     private string _docKey = string.Empty;
     private OcrCache? _ocrCache;
+    private bool _isDirty;
 
     // Pages
     public ObservableCollection<PageViewModel> Pages { get; } = new();
@@ -53,6 +59,7 @@ public sealed class MainViewModel : ObservableObject
                 OnPropertyChanged(nameof(CurrentPageNumber));
                 UpdateCurrentChapter();
                 UpdateThumbnailSelection();
+                UpdateBookmarkSelection();
             }
         }
     }
@@ -95,8 +102,14 @@ public sealed class MainViewModel : ObservableObject
     public string FileName
     {
         get => _fileName;
-        set => SetProperty(ref _fileName, value);
+        set
+        {
+            if (SetProperty(ref _fileName, value))
+                OnPropertyChanged(nameof(Title));
+        }
     }
+
+    public string Title => _isDirty ? $"{FileName}*" : FileName;
 
     private bool _isDocumentOpen;
     public bool IsDocumentOpen
@@ -157,17 +170,82 @@ public sealed class MainViewModel : ObservableObject
         set => SetProperty(ref _selectedOcrLanguage, value);
     }
 
+    private bool _isOcrRunning;
+    public bool IsOcrRunning
+    {
+        get => _isOcrRunning;
+        set => SetProperty(ref _isOcrRunning, value);
+    }
+
+    private int _ocrProgress;
+    public int OcrProgress
+    {
+        get => _ocrProgress;
+        set => SetProperty(ref _ocrProgress, value);
+    }
+
+    private CancellationTokenSource? _ocrCts;
+
     // Annotations
-    public ObservableCollection<Core.Annotations.AnnotationModel> Annotations { get; } = new();
+    public ObservableCollection<AnnotationModel> Annotations { get; } = new();
+    private AnnotationColor _selectedColor = AnnotationColor.Palette[0];
+    public AnnotationColor SelectedColor
+    {
+        get => _selectedColor;
+        set => SetProperty(ref _selectedColor, value);
+    }
+
+    // Bookmarks
+    public ObservableCollection<BookmarkEntry> Bookmarks { get; } = new();
+
+    // Recent
+    public ObservableCollection<RecentFileEntry> RecentFiles { get; } = new();
+
+    // Tabs
+    public TabsViewModel Tabs { get; } = new();
+
+    // Comfort
+    private bool _isFullScreen;
+    public bool IsFullScreen
+    {
+        get => _isFullScreen;
+        set => SetProperty(ref _isFullScreen, value);
+    }
+
+    private int _rotation = 0;
+    public int Rotation
+    {
+        get => _rotation;
+        set => SetProperty(ref _rotation, value % 360);
+    }
+
+    private bool _twoPageView;
+    public bool TwoPageView
+    {
+        get => _twoPageView;
+        set => SetProperty(ref _twoPageView, value);
+    }
+
+    private PageMode _pageMode = PageMode.Normal;
+    public PageMode PageMode
+    {
+        get => _pageMode;
+        set => SetProperty(ref _pageMode, value);
+    }
+
+    public enum PageMode { Normal, Dark, Sepia }
 
     // Events for view
     public event Action<int>? RequestGoToPage;
     public event Action? RequestFocusPageBox;
     public event Action? RequestFitWidth;
     public event Action? RequestFitPage;
+    public event Action? RequestToggleFullScreen;
 
     // Commands
     public RelayCommand OpenCommand { get; }
+    public RelayCommand SaveCommand { get; }
+    public RelayCommand SaveAsCommand { get; }
     public RelayCommand ZoomInCommand { get; }
     public RelayCommand ZoomOutCommand { get; }
     public RelayCommand ZoomResetCommand { get; }
@@ -180,15 +258,36 @@ public sealed class MainViewModel : ObservableObject
     public RelayCommand GoToPageCommand { get; }
     public RelayCommand ToggleSidebarCommand { get; }
     public RelayCommand CopyPageTextCommand { get; }
+    public RelayCommand CopyPageAsImageCommand { get; }
     public RelayCommand OcrPageCommand { get; }
+    public RelayCommand OcrAllCommand { get; }
+    public RelayCommand CancelOcrCommand { get; }
     public RelayCommand SearchCommand { get; }
     public RelayCommand SearchNextCommand { get; }
     public RelayCommand SearchPrevCommand { get; }
     public RelayCommand ClearSearchCommand { get; }
+    public RelayCommand HighlightCommand { get; }
+    public RelayCommand RemoveAnnotationCommand { get; }
+    public RelayCommand ExportHighlightsCommand { get; }
+    public RelayCommand ToggleDarkModeCommand { get; }
+    public RelayCommand RotateCommand { get; }
+    public RelayCommand ToggleTwoPageCommand { get; }
+    public RelayCommand AddBookmarkCommand { get; }
+    public RelayCommand RemoveBookmarkCommand { get; }
+    public RelayCommand ReadAloudCommand { get; }
+    public RelayCommand StopReadAloudCommand { get; }
+    public RelayCommand PrintCommand { get; }
+    public RelayCommand PropertiesCommand { get; }
+    public RelayCommand FullScreenCommand { get; }
+    public RelayCommand OpenRecentCommand { get; }
+
+    private readonly SpeechService _speech = new();
 
     public MainViewModel()
     {
         OpenCommand = new RelayCommand(async _ => await OpenFileDialogAsync());
+        SaveCommand = new RelayCommand(async _ => await SaveAsync(), _ => IsDocumentOpen && _isDirty);
+        SaveAsCommand = new RelayCommand(async _ => await SaveAsAsync(), _ => IsDocumentOpen);
         ZoomInCommand = new RelayCommand(_ => Zoom = ViewMath.ZoomIn(Zoom));
         ZoomOutCommand = new RelayCommand(_ => Zoom = ViewMath.ZoomOut(Zoom));
         ZoomResetCommand = new RelayCommand(_ => Zoom = 1.0);
@@ -201,15 +300,42 @@ public sealed class MainViewModel : ObservableObject
         GoToPageCommand = new RelayCommand(_ => RequestFocusPageBox?.Invoke());
         ToggleSidebarCommand = new RelayCommand(_ => SidebarVisible = !SidebarVisible);
         CopyPageTextCommand = new RelayCommand(async _ => await CopyCurrentPageTextAsync(), _ => IsDocumentOpen);
+        CopyPageAsImageCommand = new RelayCommand(async _ => await CopyPageAsImageAsync(), _ => IsDocumentOpen);
         OcrPageCommand = new RelayCommand(async _ => await OcrCurrentPageAsync(), _ => IsDocumentOpen && IsOcrAvailable);
+        OcrAllCommand = new RelayCommand(async _ => await OcrAllPagesAsync(), _ => IsDocumentOpen && IsOcrAvailable && !IsOcrRunning);
+        CancelOcrCommand = new RelayCommand(_ => CancelOcr(), _ => IsOcrRunning);
         SearchCommand = new RelayCommand(async _ => await DoSearchAsync());
         SearchNextCommand = new RelayCommand(_ => MoveSearch(1), _ => SearchResults.Count > 0);
         SearchPrevCommand = new RelayCommand(_ => MoveSearch(-1), _ => SearchResults.Count > 0);
         ClearSearchCommand = new RelayCommand(_ => ClearSearch());
+        HighlightCommand = new RelayCommand(async _ => await HighlightSelectionAsync(), _ => IsDocumentOpen && GetCurrentSelection() != null);
+        RemoveAnnotationCommand = new RelayCommand(async _ => await RemoveSelectedAnnotationAsync(), _ => IsDocumentOpen);
+        ExportHighlightsCommand = new RelayCommand(async _ => await ExportHighlightsAsync(), _ => Annotations.Count > 0);
+        ToggleDarkModeCommand = new RelayCommand(_ => TogglePageMode());
+        RotateCommand = new RelayCommand(_ => RotateClockwise());
+        ToggleTwoPageCommand = new RelayCommand(_ => TwoPageView = !TwoPageView);
+        AddBookmarkCommand = new RelayCommand(_ => AddBookmark(), _ => IsDocumentOpen);
+        RemoveBookmarkCommand = new RelayCommand(_ => RemoveBookmark(), _ => Bookmarks.Count > 0);
+        ReadAloudCommand = new RelayCommand(async _ => await ReadAloudAsync(), _ => IsDocumentOpen);
+        StopReadAloudCommand = new RelayCommand(_ => _speech.Stop());
+        PrintCommand = new RelayCommand(async _ => await PrintAsync(), _ => IsDocumentOpen);
+        PropertiesCommand = new RelayCommand(_ => ShowProperties(), _ => IsDocumentOpen);
+        FullScreenCommand = new RelayCommand(_ => { ToggleFullScreen(); RequestToggleFullScreen?.Invoke(); });
+        OpenRecentCommand = new RelayCommand(async p => { if (p is string path) await OpenFileAsync(path); });
 
         var settings = SettingsStore.LoadSettings();
         SelectedOcrLanguage = settings.OcrLanguage ?? OcrLanguages.FirstOrDefault();
         SidebarVisible = settings.SidebarVisible;
+        if (Enum.TryParse<PageMode>(settings.PageMode, true, out var pm)) PageMode = pm;
+
+        LoadRecent();
+    }
+
+    private void LoadRecent()
+    {
+        RecentFiles.Clear();
+        foreach (var r in SettingsStore.LoadRecent())
+            RecentFiles.Add(r);
     }
 
     private void RaiseGoToPageCanExecute()
@@ -247,7 +373,6 @@ public sealed class MainViewModel : ObservableObject
             CurrentChapter = null;
             return;
         }
-        // Find last item with PageIndex <= current page
         OutlineNodeViewModel? best = null;
         int bestPage = -1;
         foreach (var node in Outline.SelectMany(n => n.Flatten()))
@@ -266,6 +391,18 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
+    private void UpdateBookmarkSelection()
+    {
+        // Could highlight bookmark if current page matches
+    }
+
+    private TextSelection? GetCurrentSelection()
+    {
+        if (Pages.Count == 0) return null;
+        var page = Pages[CurrentPageIndex];
+        return page.Selection;
+    }
+
     public async Task OpenFileAsync(string path, string? password = null)
     {
         if (!File.Exists(path))
@@ -274,6 +411,7 @@ public sealed class MainViewModel : ObservableObject
             return;
         }
 
+        // Check if already open in tabs
         CloseDocument();
 
         StatusText = $"Opening {System.IO.Path.GetFileName(path)}...";
@@ -286,8 +424,9 @@ public sealed class MainViewModel : ObservableObject
             FileName = System.IO.Path.GetFileName(path);
             PageCount = doc.PageCount;
             IsDocumentOpen = true;
+            _isDirty = false;
+            OnPropertyChanged(nameof(Title));
 
-            // Doc key for caches
             try
             {
                 var id = await doc.GetFileIdentifierAsync();
@@ -299,7 +438,6 @@ public sealed class MainViewModel : ObservableObject
             }
             _ocrCache = new OcrCache(_docKey);
 
-            // Build page view models
             Pages.Clear();
             Thumbnails.Clear();
             for (int i = 0; i < doc.PageCount; i++)
@@ -314,7 +452,7 @@ public sealed class MainViewModel : ObservableObject
             CurrentPageIndex = 0;
             StatusText = $"{FileName} - {PageCount} pages";
 
-            // Load outline async
+            // Outline
             _ = Task.Run(async () =>
             {
                 try
@@ -331,25 +469,20 @@ public sealed class MainViewModel : ObservableObject
                 catch { }
             });
 
-            // Preload text layers for search (background)
+            // Text layers
             _ = Task.Run(async () =>
             {
                 for (int i = 0; i < doc.PageCount; i++)
                 {
                     try
                     {
-                        // Check OCR cache first
                         if (_ocrCache != null && _ocrCache.TryGet(i, out var cachedOcr) && cachedOcr != null)
                         {
-                            var layer = PageTextLayer.FromOcr(i, cachedOcr, doc.PageSizes[i], 1000, 1000); // approx, will need actual bitmap size
-                            // For cached, we don't have bitmap size, use page size mapping
-                            // We'll store directly
-                            lock (_textLayers)
-                            {
-                                _textLayers[i] = layer;
-                            }
+                            // Need actual bitmap size for accurate conversion, approximate with page size
+                            var layer = PageTextLayer.FromOcr(i, cachedOcr, doc.PageSizes[i], 1000, 1000);
+                            lock (_textLayers) _textLayers[i] = layer;
                             _searchService.SetLayer(layer);
-                            Pages[i].TextLayer = layer;
+                            Application.Current.Dispatcher.Invoke(() => Pages[i].TextLayer = layer);
                             continue;
                         }
 
@@ -360,22 +493,69 @@ public sealed class MainViewModel : ObservableObject
                             _searchService.SetLayer(tl);
                             Application.Current.Dispatcher.Invoke(() => Pages[i].TextLayer = tl);
                         }
+                        else
+                        {
+                            // Scanned detection: char count <8
+                            var cnt = await doc.GetCharCountAsync(i);
+                            if (cnt < 8)
+                            {
+                                Application.Current.Dispatcher.Invoke(() =>
+                                {
+                                    // Banner will show via HasText false
+                                    Pages[i].TextLayer = null;
+                                });
+                            }
+                        }
                     }
                     catch { }
                     await Task.Delay(10);
                 }
             });
 
-            // Recent
-            SettingsStore.AddRecent(path, _docKey, 0, Zoom);
+            // Annotations
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    Annotations.Clear();
+                    for (int i = 0; i < doc.PageCount; i++)
+                    {
+                        var annots = await doc.GetAnnotationsAsync(i);
+                        foreach (var a in annots)
+                        {
+                            var model = new AnnotationModel(i, a.Index, (AnnotationType)a.Subtype, GetColorName(a.R, a.G, a.B), a.R, a.G, a.B, a.Quads, a.Contents, a.Contents);
+                            Application.Current.Dispatcher.Invoke(() => Annotations.Add(model));
+                        }
+                    }
+                }
+                catch { }
+            });
 
+            // Bookmarks for this docKey
+            Bookmarks.Clear();
+            var recent = SettingsStore.LoadRecent().FirstOrDefault(r => r.DocKey == _docKey);
+            if (recent != null)
+            {
+                foreach (var bm in recent.Bookmarks)
+                    Bookmarks.Add(bm);
+                // Resume
+                if (recent.Page >= 0 && recent.Page < PageCount)
+                {
+                    CurrentPageIndex = recent.Page;
+                    RequestGoToPage?.Invoke(recent.Page);
+                    if (recent.Zoom > 0) Zoom = recent.Zoom;
+                }
+            }
+
+            SettingsStore.AddRecent(path, _docKey, 0, Zoom);
+            LoadRecent();
             RaiseGoToPageCanExecute();
+            SaveCommand.RaiseCanExecuteChanged();
+            SaveAsCommand.RaiseCanExecuteChanged();
         }
         catch (PdfiumException ex) when (ex.ErrorCode == 4)
         {
-            // Password required
             StatusText = "Password required.";
-            // Prompt via dialog handled in MainWindow
             throw;
         }
         catch (Exception ex)
@@ -385,22 +565,34 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
+    private static string GetColorName(byte r, byte g, byte b)
+    {
+        var closest = AnnotationColor.Palette.OrderBy(c => Math.Abs(c.R - r) + Math.Abs(c.G - g) + Math.Abs(c.B - b)).FirstOrDefault();
+        return closest?.Name ?? "Custom";
+    }
+
     public async Task OpenFileDialogAsync()
     {
         var dlg = new Microsoft.Win32.OpenFileDialog
         {
-            Filter = "PDF files (*.pdf)|*.pdf|All files (*.*)|*.*",
-            Title = "Open PDF"
+            Filter = "PDF files (*.pdf)|*.pdf|Image files (*.png;*.jpg;*.jpeg;*.bmp;*.tiff)|*.png;*.jpg;*.jpeg;*.bmp;*.tiff|All files (*.*)|*.*",
+            Title = "Open"
         };
         if (dlg.ShowDialog() == true)
         {
+            string ext = System.IO.Path.GetExtension(dlg.FileName).ToLowerInvariant();
+            if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp" || ext == ".tiff" || ext == ".tif")
+            {
+                await OpenImageAsync(dlg.FileName);
+                return;
+            }
+
             try
             {
                 await OpenFileAsync(dlg.FileName);
             }
             catch (PdfiumException ex) when (ex.ErrorCode == 4)
             {
-                // Ask password 3 times
                 for (int attempt = 0; attempt < 3; attempt++)
                 {
                     var pwdDlg = new Views.PasswordDialog();
@@ -422,6 +614,54 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
+    private async Task OpenImageAsync(string path)
+    {
+        try
+        {
+            // Load via WPF decoder
+            var decoder = BitmapDecoder.Create(new Uri(path), BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad);
+            var frame = decoder.Frames[0];
+            int w = frame.PixelWidth;
+            int h = frame.PixelHeight;
+            int stride = w * 4;
+            byte[] pixels = new byte[stride * h];
+            frame.CopyPixels(pixels, stride, 0);
+            var rendered = new RenderedBitmap(w, h, stride, pixels);
+            // Page size in points: assume 96 DPI -> points = pixels * 72/96
+            double pw = w * 72.0 / 96.0;
+            double ph = h * 72.0 / 96.0;
+            var size = new PageSize(pw, ph);
+            var doc = new ImageDocument(path, rendered, size);
+            // Use same flow as PDF but with image doc
+            CloseDocument();
+            _document = doc;
+            _filePath = path;
+            FileName = System.IO.Path.GetFileName(path);
+            PageCount = 1;
+            IsDocumentOpen = true;
+            _docKey = OcrCache.ComputeDocKey(path, null);
+            _ocrCache = new OcrCache(_docKey);
+
+            Pages.Clear();
+            Thumbnails.Clear();
+            var pvm = new PageViewModel(0, size);
+            pvm.UpdateZoom(Zoom, DpiScale);
+            Pages.Add(pvm);
+            Thumbnails.Add(new ThumbnailViewModel(0, size));
+
+            CurrentPageIndex = 0;
+            StatusText = $"{FileName} - Image {w}x{h}";
+
+            // Auto OCR image
+            if (IsOcrAvailable)
+                await OcrCurrentPageAsync();
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Failed to open image: {ex.Message}";
+        }
+    }
+
     public void CloseDocument()
     {
         if (_document != null)
@@ -435,6 +675,7 @@ public sealed class MainViewModel : ObservableObject
         Thumbnails.Clear();
         Outline.Clear();
         SearchResults.Clear();
+        Annotations.Clear();
         _textLayers.Clear();
         _searchService.Clear();
         BitmapCache.Clear();
@@ -442,13 +683,48 @@ public sealed class MainViewModel : ObservableObject
         IsDocumentOpen = false;
         FileName = "No document";
         StatusText = "Ready";
+        _isDirty = false;
+        OnPropertyChanged(nameof(Title));
         RaiseGoToPageCanExecute();
     }
 
     public async Task<RenderedBitmap> RenderPageForVmAsync(int pageIndex, int pixelWidth, int pixelHeight, RenderFlags flags, int priority, CancellationToken ct)
     {
         if (_document == null) throw new InvalidOperationException("No document");
-        return await _document.RenderPageAsync(pageIndex, pixelWidth, pixelHeight, flags, priority, ct);
+
+        // Apply dark/sepia transform if needed
+        var bmp = await _document.RenderPageAsync(pageIndex, pixelWidth, pixelHeight, flags, priority, ct);
+        if (PageMode == PageMode.Dark)
+        {
+            // Invert colors for dark mode (simple)
+            var pixels = bmp.Pixels;
+            for (int i = 0; i < pixels.Length; i += 4)
+            {
+                pixels[i] = (byte)(255 - pixels[i]); // B
+                pixels[i + 1] = (byte)(255 - pixels[i + 1]); // G
+                pixels[i + 2] = (byte)(255 - pixels[i + 2]); // R
+            }
+            return bmp with { Pixels = pixels };
+        }
+        else if (PageMode == PageMode.Sepia)
+        {
+            var pixels = bmp.Pixels;
+            for (int i = 0; i < pixels.Length; i += 4)
+            {
+                byte b = pixels[i];
+                byte g = pixels[i + 1];
+                byte r = pixels[i + 2];
+                // Sepia formula
+                int tr = (int)(0.393 * r + 0.769 * g + 0.189 * b);
+                int tg = (int)(0.349 * r + 0.686 * g + 0.168 * b);
+                int tb = (int)(0.272 * r + 0.534 * g + 0.131 * b);
+                pixels[i] = (byte)Math.Min(255, tb);
+                pixels[i + 1] = (byte)Math.Min(255, tg);
+                pixels[i + 2] = (byte)Math.Min(255, tr);
+            }
+            return bmp with { Pixels = pixels };
+        }
+        return bmp;
     }
 
     private async Task CopyCurrentPageTextAsync()
@@ -469,16 +745,34 @@ public sealed class MainViewModel : ObservableObject
         }
     }
 
-    private async Task OcrCurrentPageAsync()
+    private async Task CopyPageAsImageAsync()
     {
-        if (_document == null || _pdfiumDoc == null) return;
-        if (!IsOcrAvailable) return;
-
-        StatusText = $"OCR page {CurrentPageNumber}...";
+        if (_document == null) return;
         try
         {
-            // Render at 300 DPI: scale = 300/72 = 4.1667
-            var pageSize = _pdfiumDoc.PageSizes[CurrentPageIndex];
+            var page = Pages[CurrentPageIndex];
+            var bmp = await _document.RenderPageAsync(CurrentPageIndex, page.TargetPixelWidth, page.TargetPixelHeight, RenderFlags.Annotations, RenderPriority.Interactive);
+            var wb = new WriteableBitmap(bmp.Width, bmp.Height, 96 * DpiScale, 96 * DpiScale, System.Windows.Media.PixelFormats.Bgra32, null);
+            wb.WritePixels(new System.Windows.Int32Rect(0, 0, bmp.Width, bmp.Height), bmp.Pixels, bmp.Stride, 0);
+            Clipboard.SetImage(wb);
+            StatusText = $"Copied page {CurrentPageNumber} as image.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Copy image failed: {ex.Message}";
+        }
+    }
+
+    public async Task OcrCurrentPageAsync()
+    {
+        if (_document == null || !IsOcrAvailable) return;
+        if (_pdfiumDoc == null && _document is not ImageDocument) return;
+
+        StatusText = $"OCR page {CurrentPageNumber}...";
+        IsOcrRunning = true;
+        try
+        {
+            PageSize pageSize = _document.PageSizes[CurrentPageIndex];
             int targetW = (int)(pageSize.Width * 300.0 / 72.0);
             int targetH = (int)(pageSize.Height * 300.0 / 72.0);
             var clamped = ViewMath.ClampToMax(targetW, targetH, _ocrEngine.MaxImageDimension);
@@ -488,16 +782,13 @@ public sealed class MainViewModel : ObservableObject
             var rendered = await _document.RenderPageAsync(CurrentPageIndex, targetW, targetH, RenderFlags.Annotations, RenderPriority.Background);
             var ocrResult = await _ocrEngine.RecognizeAsync(rendered, SelectedOcrLanguage);
 
-            // Save to cache
             _ocrCache?.Set(CurrentPageIndex, ocrResult, targetW, targetH);
 
-            // Build text layer
             var layer = PageTextLayer.FromOcr(CurrentPageIndex, ocrResult, pageSize, targetW, targetH);
             _textLayers[CurrentPageIndex] = layer;
             _searchService.SetLayer(layer);
             Pages[CurrentPageIndex].TextLayer = layer;
 
-            // Show text window
             var wnd = new Views.TextWindow();
             wnd.SetText(ocrResult.Text, $"OCR - Page {CurrentPageNumber}");
             wnd.Show();
@@ -507,6 +798,132 @@ public sealed class MainViewModel : ObservableObject
         catch (Exception ex)
         {
             StatusText = $"OCR failed: {ex.Message}";
+        }
+        finally
+        {
+            IsOcrRunning = false;
+        }
+    }
+
+    public async Task OcrAllPagesAsync()
+    {
+        if (_document == null || _pdfiumDoc == null) return;
+        IsOcrRunning = true;
+        _ocrCts = new CancellationTokenSource();
+        var ct = _ocrCts.Token;
+        try
+        {
+            for (int i = 0; i < PageCount; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                OcrProgress = (int)((double)i / PageCount * 100);
+                StatusText = $"OCR {i + 1}/{PageCount}... {OcrProgress}%";
+
+                if (_textLayers.ContainsKey(i) && _textLayers[i].Source == TextSource.Ocr)
+                    continue;
+
+                // Check char count
+                int cnt = await _pdfiumDoc.GetCharCountAsync(i, ct);
+                if (cnt >= 8) continue;
+
+                var pageSize = _pdfiumDoc.PageSizes[i];
+                int targetW = (int)(pageSize.Width * 300.0 / 72.0);
+                int targetH = (int)(pageSize.Height * 300.0 / 72.0);
+                var clamped = ViewMath.ClampToMax(targetW, targetH, _ocrEngine.MaxImageDimension);
+                targetW = clamped.Width;
+                targetH = clamped.Height;
+
+                var rendered = await _document.RenderPageAsync(i, targetW, targetH, RenderFlags.Annotations, RenderPriority.Background, ct);
+                var ocrResult = await _ocrEngine.RecognizeAsync(rendered, SelectedOcrLanguage, ct);
+
+                _ocrCache?.Set(i, ocrResult, targetW, targetH);
+
+                var layer = PageTextLayer.FromOcr(i, ocrResult, pageSize, targetW, targetH);
+                _textLayers[i] = layer;
+                _searchService.SetLayer(layer);
+                Application.Current.Dispatcher.Invoke(() => Pages[i].TextLayer = layer);
+            }
+            StatusText = $"OCR all done.";
+        }
+        catch (OperationCanceledException)
+        {
+            StatusText = "OCR canceled.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"OCR failed: {ex.Message}";
+        }
+        finally
+        {
+            IsOcrRunning = false;
+            OcrProgress = 0;
+            _ocrCts = null;
+            CancelOcrCommand.RaiseCanExecuteChanged();
+            OcrAllCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    private void CancelOcr()
+    {
+        _ocrCts?.Cancel();
+    }
+
+    public async Task RegionOcrAsync(int pageIndex, RectD pdfRect)
+    {
+        if (_document == null || !IsOcrAvailable) return;
+        try
+        {
+            // Render region at 300 DPI
+            var pageSize = _document.PageSizes[pageIndex];
+            // pdfRect is in PDF points, convert to pixel clip
+            // We need to render that region at 300 DPI
+            double scale = 300.0 / 72.0;
+            int regionW = (int)((pdfRect.Right - pdfRect.Left) * scale);
+            int regionH = (int)((pdfRect.Top - pdfRect.Bottom) * scale);
+            var clamped = ViewMath.ClampToMax(regionW, regionH, _ocrEngine.MaxImageDimension);
+            regionW = clamped.Width;
+            regionH = clamped.Height;
+
+            // For simplicity, render whole page then crop
+            int fullW = (int)(pageSize.Width * scale);
+            int fullH = (int)(pageSize.Height * scale);
+            var fullClamped = ViewMath.ClampToMax(fullW, fullH, _ocrEngine.MaxImageDimension);
+            fullW = fullClamped.Width;
+            fullH = fullClamped.Height;
+
+            var rendered = await _document.RenderPageAsync(pageIndex, fullW, fullH, RenderFlags.Annotations, RenderPriority.Background);
+
+            // Crop to region
+            double sx = (double)fullW / pageSize.Width;
+            double sy = (double)fullH / pageSize.Height;
+            int x = (int)(pdfRect.Left * sx);
+            int y = (int)((pageSize.Height - pdfRect.Top) * sy);
+            int w = (int)((pdfRect.Right - pdfRect.Left) * sx);
+            int h = (int)((pdfRect.Top - pdfRect.Bottom) * sy);
+
+            x = Math.Clamp(x, 0, fullW - 1);
+            y = Math.Clamp(y, 0, fullH - 1);
+            w = Math.Clamp(w, 1, fullW - x);
+            h = Math.Clamp(h, 1, fullH - y);
+
+            byte[] cropped = new byte[w * h * 4];
+            for (int row = 0; row < h; row++)
+            {
+                int srcRow = y + row;
+                int srcOffset = srcRow * rendered.Stride + x * 4;
+                int dstOffset = row * w * 4;
+                Array.Copy(rendered.Pixels, srcOffset, cropped, dstOffset, w * 4);
+            }
+            var croppedBmp = new RenderedBitmap(w, h, w * 4, cropped);
+            var ocrResult = await _ocrEngine.RecognizeAsync(croppedBmp, SelectedOcrLanguage);
+
+            var wnd = new Views.TextWindow();
+            wnd.SetText(ocrResult.Text, $"Region OCR - Page {pageIndex + 1}");
+            wnd.Show();
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Region OCR failed: {ex.Message}";
         }
     }
 
@@ -518,11 +935,21 @@ public sealed class MainViewModel : ObservableObject
         CurrentSearchIndex = -1;
         try
         {
-            // Ensure text layers are loaded for all pages? Search over existing layers, but also need to ensure layers loaded
-            // For pages not yet loaded, load synchronously in background
             var results = await _searchService.SearchAsync(SearchQuery);
             foreach (var r in results)
                 SearchResults.Add(r);
+
+            // Update search rects on pages
+            foreach (var p in Pages)
+                p.SearchRects = Array.Empty<RectD>();
+
+            foreach (var group in results.GroupBy(r => r.PageIndex))
+            {
+                var rects = group.SelectMany(r => r.Rects).ToList();
+                if (group.Key >= 0 && group.Key < Pages.Count)
+                    Pages[group.Key].SearchRects = rects;
+            }
+
             StatusText = $"Found {results.Count} results for '{SearchQuery}'.";
             if (results.Count > 0)
             {
@@ -560,6 +987,8 @@ public sealed class MainViewModel : ObservableObject
         SearchQuery = string.Empty;
         SearchResults.Clear();
         CurrentSearchIndex = -1;
+        foreach (var p in Pages)
+            p.SearchRects = Array.Empty<RectD>();
         StatusText = "Search cleared.";
     }
 
@@ -582,6 +1011,7 @@ public sealed class MainViewModel : ObservableObject
     {
         if (Pages.Count == 0) return Zoom;
         double maxWidth = Pages.Max(p => p.PageSize.Width);
+        if (TwoPageView) maxWidth *= 2;
         return ViewMath.FitWidth(viewportWidthDip, maxWidth, chromeDip);
     }
 
@@ -589,50 +1019,271 @@ public sealed class MainViewModel : ObservableObject
     {
         if (Pages.Count == 0) return Zoom;
         var page = Pages[CurrentPageIndex].PageSize;
+        if (TwoPageView)
+        {
+            // Two pages side by side
+            page = new PageSize(page.Width * 2, page.Height);
+        }
         return ViewMath.FitPage(viewportWidthDip, viewportHeightDip, page, hChrome, vChrome);
     }
 
-    // Comfort features (stubs for T-62..T-69)
-
-    private bool _isFullScreen;
-    public bool IsFullScreen
+    // Annotations
+    public async Task HighlightSelectionAsync()
     {
-        get => _isFullScreen;
-        set => SetProperty(ref _isFullScreen, value);
+        var sel = GetCurrentSelection();
+        if (sel == null || sel.IsEmpty || _pdfiumDoc == null) return;
+        var rects = sel.GetRects();
+        bool ok = await _pdfiumDoc.AddHighlightAsync(sel.PageIndex, rects, SelectedColor.R, SelectedColor.G, SelectedColor.B, sel.GetText());
+        if (ok)
+        {
+            _isDirty = true;
+            OnPropertyChanged(nameof(Title));
+            SaveCommand.RaiseCanExecuteChanged();
+            // Re-render
+            Pages[sel.PageIndex].OnUnrealized();
+            BitmapCache.Clear();
+            // Reload annotations
+            var annots = await _pdfiumDoc.GetAnnotationsAsync(sel.PageIndex);
+            Annotations.Clear();
+            foreach (var a in annots)
+            {
+                var model = new AnnotationModel(sel.PageIndex, a.Index, (AnnotationType)a.Subtype, GetColorName(a.R, a.G, a.B), a.R, a.G, a.B, a.Quads, a.Contents, a.Contents);
+                Annotations.Add(model);
+            }
+            StatusText = "Highlight added.";
+        }
     }
 
-    private int _rotation = 0; // 0,90,180,270
-    public int Rotation
+    public async Task RemoveSelectedAnnotationAsync()
     {
-        get => _rotation;
-        set => SetProperty(ref _rotation, value % 360);
+        if (_pdfiumDoc == null || Annotations.Count == 0) return;
+        // For simplicity, remove last annotation on current page
+        var toRemove = Annotations.Where(a => a.PageIndex == CurrentPageIndex).OrderByDescending(a => a.AnnotIndex).FirstOrDefault();
+        if (toRemove == null) return;
+        bool ok = await _pdfiumDoc.RemoveAnnotationAsync(toRemove.PageIndex, toRemove.AnnotIndex);
+        if (ok)
+        {
+            Annotations.Remove(toRemove);
+            _isDirty = true;
+            OnPropertyChanged(nameof(Title));
+            SaveCommand.RaiseCanExecuteChanged();
+            StatusText = "Annotation removed.";
+        }
     }
 
-    private bool _twoPageView;
-    public bool TwoPageView
+    public async Task AddStickyNoteAsync(int pageIndex, RectD rect, string text)
     {
-        get => _twoPageView;
-        set => SetProperty(ref _twoPageView, value);
+        if (_pdfiumDoc == null) return;
+        // Use highlight API but with text annotation subtype
+        // For simplicity, add highlight with contents as note
+        var rects = new List<RectD> { rect };
+        bool ok = await _pdfiumDoc.AddHighlightAsync(pageIndex, rects, 255, 255, 0, text);
+        if (ok)
+        {
+            _isDirty = true;
+            OnPropertyChanged(nameof(Title));
+            StatusText = "Sticky note added.";
+        }
     }
 
-    private PageMode _pageMode = PageMode.Normal;
-    public PageMode PageMode
+    public async Task SaveAsync()
     {
-        get => _pageMode;
-        set => SetProperty(ref _pageMode, value);
+        if (_pdfiumDoc == null || string.IsNullOrEmpty(_filePath)) return;
+        try
+        {
+            StatusText = "Saving...";
+            bool saved = await _pdfiumDoc.SaveIncrementalToSameFileAsync();
+            if (!saved)
+            {
+                StatusText = "Save failed.";
+                return;
+            }
+            // Need to close and replace file
+            string tmpPath = _filePath + ".litepdf-tmp";
+            if (!File.Exists(tmpPath))
+            {
+                StatusText = "Save failed: tmp not found.";
+                return;
+            }
+
+            // Close doc
+            var doc = _pdfiumDoc;
+            _pdfiumDoc = null;
+            _document = null;
+            await doc.DisposeAsync();
+            // Replace
+            try
+            {
+                File.Replace(tmpPath, _filePath, null);
+            }
+            catch
+            {
+                // If replace fails, keep tmp
+                StatusText = $"Saved to temp: {tmpPath}";
+                return;
+            }
+
+            // Reopen
+            await OpenFileAsync(_filePath);
+            _isDirty = false;
+            OnPropertyChanged(nameof(Title));
+            StatusText = "Saved.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Save failed: {ex.Message}";
+        }
     }
 
-    public enum PageMode { Normal, Dark, Sepia }
+    public async Task SaveAsAsync()
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Filter = "PDF files (*.pdf)|*.pdf",
+            FileName = System.IO.Path.GetFileName(_filePath)
+        };
+        if (dlg.ShowDialog() != true) return;
+        if (_pdfiumDoc == null) return;
+        try
+        {
+            bool ok = await _pdfiumDoc.SaveAsync(dlg.FileName, false);
+            if (ok)
+            {
+                StatusText = $"Saved as {dlg.FileName}";
+                _isDirty = false;
+                OnPropertyChanged(nameof(Title));
+            }
+            else
+                StatusText = "Save As failed.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Save As failed: {ex.Message}";
+        }
+    }
+
+    public async Task ExportHighlightsAsync()
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog
+        {
+            Filter = "Markdown (*.md)|*.md|Text (*.txt)|*.txt",
+            FileName = System.IO.Path.GetFileNameWithoutExtension(FileName) + "-highlights.md"
+        };
+        if (dlg.ShowDialog() != true) return;
+        ExportHighlightsToMarkdown(dlg.FileName);
+    }
+
+    public void TogglePageMode()
+    {
+        PageMode = PageMode switch
+        {
+            PageMode.Normal => PageMode.Dark,
+            PageMode.Dark => PageMode.Sepia,
+            PageMode.Sepia => PageMode.Normal,
+            _ => PageMode.Normal
+        };
+        // Clear cache to force re-render with new mode
+        BitmapCache.Clear();
+        foreach (var p in Pages) p.OnUnrealized();
+        var settings = SettingsStore.LoadSettings();
+        settings.PageMode = PageMode.ToString().ToLower();
+        SettingsStore.SaveSettings(settings);
+        StatusText = $"Page mode: {PageMode}";
+    }
+
+    public void RotateClockwise()
+    {
+        Rotation = (Rotation + 90) % 360;
+        // Swap sizes for 90/270
+        if (Rotation % 180 != 0)
+        {
+            // For simplicity, just update dip sizes (swap)
+            foreach (var p in Pages)
+            {
+                // Need to recalc? We'll just trigger zoom update
+                p.UpdateZoom(Zoom, DpiScale);
+            }
+        }
+        StatusText = $"Rotated {Rotation}°";
+    }
 
     public void ToggleFullScreen()
     {
         IsFullScreen = !IsFullScreen;
     }
 
-    public void RotateClockwise()
+    public void AddBookmark()
     {
-        Rotation = (Rotation + 90) % 360;
-        // In real implementation, page sizes would swap width/height for 90/270
+        var bm = new BookmarkEntry { Title = $"Page {CurrentPageNumber}", Page = CurrentPageIndex, Created = DateTime.UtcNow };
+        Bookmarks.Add(bm);
+        // Save to recent
+        var recent = SettingsStore.LoadRecent();
+        var entry = recent.FirstOrDefault(r => r.DocKey == _docKey);
+        if (entry != null)
+        {
+            entry.Bookmarks.Add(bm);
+            SettingsStore.SaveRecent(recent);
+        }
+        StatusText = $"Bookmark added: {bm.Title}";
+    }
+
+    public void RemoveBookmark()
+    {
+        if (Bookmarks.Count == 0) return;
+        var last = Bookmarks[^1];
+        Bookmarks.Remove(last);
+        var recent = SettingsStore.LoadRecent();
+        var entry = recent.FirstOrDefault(r => r.DocKey == _docKey);
+        if (entry != null)
+        {
+            entry.Bookmarks.RemoveAll(b => b.Page == last.Page && b.Title == last.Title);
+            SettingsStore.SaveRecent(recent);
+        }
+    }
+
+    public async Task ReadAloudAsync()
+    {
+        if (_document == null) return;
+        try
+        {
+            var text = await _document.GetPageTextAsync(CurrentPageIndex);
+            if (string.IsNullOrWhiteSpace(text) && _textLayers.TryGetValue(CurrentPageIndex, out var layer))
+                text = layer.GetText();
+
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                // Find host panel for MediaElement
+                var host = Application.Current.MainWindow as MainWindow;
+                // For simplicity, use speech service with dummy host
+                await _speech.SpeakAsync(text, host!);
+                StatusText = "Reading aloud...";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Read aloud failed: {ex.Message}";
+        }
+    }
+
+    public async Task PrintAsync()
+    {
+        if (_document == null) return;
+        try
+        {
+            await PrintService.PrintAsync(_document, CurrentPageIndex);
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Print failed: {ex.Message}";
+        }
+    }
+
+    public void ShowProperties()
+    {
+        var dlg = new PropertiesDialog();
+        dlg.Owner = Application.Current.MainWindow;
+        dlg.SetProperties(_filePath, PageCount, Pages.Count > 0 ? Pages[CurrentPageIndex].PageSize : new PageSize(0, 0), _docKey);
+        dlg.ShowDialog();
     }
 
     public void ExportHighlightsToMarkdown(string path)
@@ -655,5 +1306,17 @@ public sealed class MainViewModel : ObservableObject
         {
             StatusText = $"Export failed: {ex.Message}";
         }
+    }
+
+    public bool PromptSaveIfDirty()
+    {
+        if (!_isDirty) return true;
+        var result = MessageBox.Show($"Save changes to {FileName}?", "LitePDF", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+        if (result == MessageBoxResult.Cancel) return false;
+        if (result == MessageBoxResult.Yes)
+        {
+            _ = SaveAsync();
+        }
+        return true;
     }
 }

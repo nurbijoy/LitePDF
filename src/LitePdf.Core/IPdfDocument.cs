@@ -1,3 +1,5 @@
+using LitePdf.Core.Text;
+
 namespace LitePdf.Core;
 
 /// <summary>
@@ -21,4 +23,12 @@ public interface IPdfDocument : IAsyncDisposable
 
     /// <summary>Number of text characters on the page; close to 0 means the page is probably scanned.</summary>
     Task<int> GetCharCountAsync(int pageIndex, CancellationToken ct = default);
+
+    // Extended API (T-30, T-14, T-50)
+    Task<PageTextLayer?> GetTextLayerAsync(int pageIndex, CancellationToken ct = default) => Task.FromResult<PageTextLayer?>(null);
+    Task<IReadOnlyList<PdfLink>> GetLinksAsync(int pageIndex, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<PdfLink>>(Array.Empty<PdfLink>());
+    Task<byte[]> GetFileIdentifierAsync(CancellationToken ct = default) => Task.FromResult(Array.Empty<byte>());
 }
+
+// Keep PdfLink here for Core reference (actual type is in Pdfium namespace, but we expose a Core version for interface)
+public sealed record PdfLink(RectD Rect, int DestPageIndex, string? Uri);

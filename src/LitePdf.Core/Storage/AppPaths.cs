@@ -27,6 +27,11 @@ public sealed class AppSettings
     public string? OcrLanguage { get; set; }
     public bool SidebarVisible { get; set; } = true;
     public double PageMargin { get; set; } = 12;
+    public double WindowLeft { get; set; } = double.NaN;
+    public double WindowTop { get; set; } = double.NaN;
+    public double WindowWidth { get; set; } = 1200;
+    public double WindowHeight { get; set; } = 800;
+    public bool IsMaximized { get; set; } = false;
 }
 
 public sealed class RecentFileEntry

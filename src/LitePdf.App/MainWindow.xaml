@@ -30,6 +30,7 @@
         <ToolBarTray DockPanel.Dock="Top">
             <ToolBar>
                 <Button Content="Open" Command="{Binding OpenCommand}" ToolTip="Open (Ctrl+O)"/>
+                <Button Content="Save" Command="{Binding SaveCommand}" ToolTip="Save (Ctrl+S)"/>
                 <Separator/>
                 <Button Content="☰" Command="{Binding ToggleSidebarCommand}" ToolTip="Toggle sidebar (F4)"/>
                 <Separator/>
@@ -55,6 +56,26 @@
                 <Separator/>
                 <Button Content="Copy text" Command="{Binding CopyPageTextCommand}" ToolTip="Copy page text"/>
                 <Button Content="OCR page" Command="{Binding OcrPageCommand}" ToolTip="OCR current page"/>
+                <Button Content="OCR all" Command="{Binding OcrAllCommand}" ToolTip="OCR all pages"/>
+                <Separator/>
+                <ComboBox x:Name="ColorBox" Width="80" SelectedIndex="0" ToolTip="Highlight color">
+                    <ComboBoxItem Content="Yellow" Tag="#FFE500"/>
+                    <ComboBoxItem Content="Green" Tag="#7CE07C"/>
+                    <ComboBoxItem Content="Blue" Tag="#7CC7FF"/>
+                    <ComboBoxItem Content="Pink" Tag="#FF8AC8"/>
+                    <ComboBoxItem Content="Orange" Tag="#FFB347"/>
+                </ComboBox>
+                <Button Content="Highlight" Command="{Binding HighlightCommand}" ToolTip="Highlight selection"/>
+                <Button Content="Remove" Command="{Binding RemoveAnnotationCommand}" ToolTip="Remove annotation (Del)"/>
+                <Separator/>
+                <Button Content="Dark" Command="{Binding ToggleDarkModeCommand}" ToolTip="Toggle dark/sepia"/>
+                <Button Content="↻" Command="{Binding RotateCommand}" ToolTip="Rotate 90°"/>
+                <Button Content="2P" Command="{Binding ToggleTwoPageCommand}" ToolTip="Two-page view"/>
+                <Button Content="★" Command="{Binding AddBookmarkCommand}" ToolTip="Add bookmark"/>
+                <Button Content="🔊" Command="{Binding ReadAloudCommand}" ToolTip="Read aloud"/>
+                <Button Content="Print" Command="{Binding PrintCommand}" ToolTip="Print"/>
+                <Button Content="Props" Command="{Binding PropertiesCommand}" ToolTip="Properties"/>
+                <Button Content="F11" Command="{Binding FullScreenCommand}" ToolTip="Full screen (F11)"/>
             </ToolBar>
         </ToolBarTray>
 
@@ -188,7 +209,7 @@
 
             <!-- Document view -->
             <ScrollViewer x:Name="DocumentScrollViewer" Grid.Column="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#EEE" PreviewMouseWheel="DocumentScrollViewer_PreviewMouseWheel" ScrollChanged="DocumentScrollViewer_ScrollChanged">
-                <ItemsControl x:Name="PagesControl" ItemsSource="{Binding Pages}">
+                <ItemsControl x:Name="PagesControl" ItemsSource="{Binding Pages}" xmlns:views="clr-namespace:LitePdf.App.Views">
                     <ItemsControl.ItemsPanel>
                         <ItemsPanelTemplate>
                             <VirtualizingStackPanel IsVirtualizing="True" VirtualizationMode="Recycling" ScrollUnit="Pixel"/>
@@ -196,23 +217,7 @@
                     </ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>
                         <DataTemplate>
-                            <Border Background="White" Margin="12" Width="{Binding DipWidth}" Height="{Binding DipHeight}" HorizontalAlignment="Center" VerticalAlignment="Top">
-                                <Border.Effect>
-                                    <DropShadowEffect BlurRadius="8" ShadowDepth="2" Opacity="0.3"/>
-                                </Border.Effect>
-                                <Grid>
-                                    <Image x:Name="PageImage" Source="{Binding Bitmap}" Stretch="Fill" RenderOptions.BitmapScalingMode="HighQuality"/>
-                                    <!-- Selection overlay would go here -->
-                                    <Border x:Name="LoadingOverlay" Background="#F0F0F0" Visibility="Collapsed">
-                                        <TextBlock Text="Loading..." HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0.5"/>
-                                    </Border>
-                                </Grid>
-                            </Border>
-                            <DataTemplate.Triggers>
-                                <DataTrigger Binding="{Binding IsRendering}" Value="True">
-                                    <Setter TargetName="LoadingOverlay" Property="Visibility" Value="Visible"/>
-                                </DataTrigger>
-                            </DataTemplate.Triggers>
+                            <views:PageView />
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>

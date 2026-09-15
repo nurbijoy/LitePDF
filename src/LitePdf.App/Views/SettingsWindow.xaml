@@ -1,0 +1,52 @@
+<Window x:Class="LitePdf.App.Views.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Settings" Height="400" Width="500"
+        WindowStartupLocation="CenterOwner">
+    <Grid Margin="12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="150"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <TextBlock Text="Theme:" Grid.Row="0" Grid.Column="0" Margin="0,6" VerticalAlignment="Center"/>
+        <ComboBox x:Name="ThemeBox" Grid.Row="0" Grid.Column="1" Margin="0,6">
+            <ComboBoxItem Content="system"/>
+            <ComboBoxItem Content="light"/>
+            <ComboBoxItem Content="dark"/>
+        </ComboBox>
+
+        <TextBlock Text="Page mode:" Grid.Row="1" Grid.Column="0" Margin="0,6" VerticalAlignment="Center"/>
+        <ComboBox x:Name="PageModeBox" Grid.Row="1" Grid.Column="1" Margin="0,6">
+            <ComboBoxItem Content="normal"/>
+            <ComboBoxItem Content="dark"/>
+            <ComboBoxItem Content="sepia"/>
+        </ComboBox>
+
+        <TextBlock Text="Default zoom:" Grid.Row="2" Grid.Column="0" Margin="0,6" VerticalAlignment="Center"/>
+        <ComboBox x:Name="ZoomBox" Grid.Row="2" Grid.Column="1" Margin="0,6">
+            <ComboBoxItem Content="fitWidth"/>
+            <ComboBoxItem Content="fitPage"/>
+            <ComboBoxItem Content="100%"/>
+        </ComboBox>
+
+        <TextBlock Text="OCR language:" Grid.Row="3" Grid.Column="0" Margin="0,6" VerticalAlignment="Center"/>
+        <ComboBox x:Name="OcrLangBox" Grid.Row="3" Grid.Column="1" Margin="0,6" IsEditable="True"/>
+
+        <TextBlock Text="To install OCR languages: Settings → Time &amp; language → Language, or admin PowerShell: Add-WindowsCapability -Online -Name 'Language.OCR~~~fr-FR~0.0.1.0'" Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Margin="0,12" TextWrapping="Wrap" FontSize="10" Opacity="0.7"/>
+
+        <StackPanel Grid.Row="6" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="OK" Width="80" Margin="0,0,8,0" IsDefault="True" Click="Ok_Click"/>
+            <Button Content="Cancel" Width="80" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>
