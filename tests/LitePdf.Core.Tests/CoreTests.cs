@@ -254,6 +254,17 @@ public sealed class TextMatcherTests
         Assert.StartsWith("…", before);
         Assert.EndsWith("…", after);
     }
+
+    [Fact]
+    public void Snippet_stays_on_the_matching_line()
+    {
+        const string text = "first line here\nthe lazy dog sleeps\nnext line";
+        var hit = new TextMatcher("lazy").FindAll(text)[0];
+        var (before, match, after) = TextMatcher.Snippet(text, hit);
+        Assert.Equal("the ", before);
+        Assert.Equal("lazy", match);
+        Assert.Equal(" dog sleeps", after);
+    }
 }
 
 public sealed class BitmapOpsTests

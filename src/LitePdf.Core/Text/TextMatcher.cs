@@ -52,17 +52,43 @@ public sealed class TextMatcher
     /// <summary>Context around a match for result lists: (before, match, after), whitespace collapsed.</summary>
     public static (string Before, string Match, string After) Snippet(string text, TextMatch match, int context = 40)
     {
-        int s = Math.Max(0, match.Start - context);
-        int e = Math.Min(text.Length, match.Start + match.Length + context);
+        // Context comes from the match's own line(s); running into neighbouring lines reads poorly in a result list.
+        int matchEnd = match.Start + match.Length;
+        int lineStart = match.Start > 0 ? text.LastIndexOf('\n', match.Start - 1) + 1 : 0;
+        int lineEnd = text.IndexOf('\n', matchEnd);
+        if (lineEnd < 0) lineEnd = text.Length;
+        int s = Math.Max(lineStart, match.Start - context);
+        int e = Math.Min(lineEnd, matchEnd + context);
+
         string before = Collapse(text[s..match.Start]);
-        string hit = Collapse(text.Substring(match.Start, match.Length));
-        string after = Collapse(text[(match.Start + match.Length)..e]);
-        if (s > 0) before = "…" + before.TrimStart();
-        if (e < text.Length) after = after.TrimEnd() + "…";
+        string hit = Collapse(text[match.Start..matchEnd]);
+        string after = Collapse(text[matchEnd..e]);
+        if (s > lineStart) before = "…" + before.TrimStart();
+        if (e < lineEnd) after = after.TrimEnd() + "…";
         return (before, hit, after);
     }
 
-    private static string Collapse(string s) => Fold(s, out _);
+    /// <summary>Collapses whitespace runs to one space, keeping a leading/trailing space (unlike <see cref="Fold"/>).</summary>
+    private static string Collapse(string s)
+    {
+        var sb = new StringBuilder(s.Length);
+        bool inSpace = false;
+        foreach (char c in s)
+        {
+            if (c == '­') continue;
+            if (char.IsWhiteSpace(c))
+            {
+                if (!inSpace) sb.Append(' ');
+                inSpace = true;
+            }
+            else
+            {
+                sb.Append(c);
+                inSpace = false;
+            }
+        }
+        return sb.ToString();
+    }
 
     private static bool IsWordBoundary(string s, int start, int length)
     {

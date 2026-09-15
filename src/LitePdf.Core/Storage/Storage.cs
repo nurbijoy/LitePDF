@@ -30,6 +30,7 @@ public static class JsonFile
     {
         WriteIndented = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true,
         Converters = { new JsonStringEnumConverter() },
     };
 
@@ -120,7 +121,8 @@ public sealed class RecentFileStore
 
     public IReadOnlyList<RecentFile> Items => _items;
 
-    public static RecentFileStore Load() => new(JsonFile.Read<List<RecentFile>>(AppPaths.RecentFile) ?? []);
+    public static RecentFileStore Load() =>
+        new((JsonFile.Read<List<RecentFile>>(AppPaths.RecentFile) ?? []).Where(i => !string.IsNullOrWhiteSpace(i.Path)).ToList());
 
     public RecentFile? Find(string path) =>
         _items.FirstOrDefault(i => string.Equals(i.Path, path, StringComparison.OrdinalIgnoreCase));

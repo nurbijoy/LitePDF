@@ -6,6 +6,7 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>LitePDF</AssemblyName>
     <RootNamespace>LitePdf.App</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
