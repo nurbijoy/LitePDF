@@ -13,8 +13,8 @@ public sealed record CachedRender(BitmapSource Bitmap, int PixelWidth, int Gener
 /// <summary>LRU bitmap caches for pages and thumbnails with separate byte budgets. UI thread only.</summary>
 public sealed class RenderCache
 {
-    private readonly Budget _pages = new(320L * 1024 * 1024);
-    private readonly Budget _thumbnails = new(64L * 1024 * 1024);
+    private readonly Budget _pages = new(128L * 1024 * 1024);
+    private readonly Budget _thumbnails = new(24L * 1024 * 1024);
 
     public bool TryGetPage(int page, int generation, PageColorMode mode, int rotation, out CachedRender bitmap) =>
         _pages.TryGet(page, generation, mode, rotation, out bitmap);

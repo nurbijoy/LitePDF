@@ -20,7 +20,7 @@ public sealed class DocumentSession : IAsyncDisposable
 
     private readonly IOcrEngine _ocr;
     private readonly Func<string?> _ocrLanguage;
-    private readonly LruCache<int, PageText> _pdfText = new(128);
+    private readonly LruCache<int, PageText> _pdfText = new(48);
     private readonly ConcurrentDictionary<int, PageText> _ocrText = new();
     private readonly Dictionary<int, IReadOnlyList<PdfLink>> _links = new();
     private readonly Dictionary<int, IReadOnlyList<PdfAnnotation>> _annotations = new();

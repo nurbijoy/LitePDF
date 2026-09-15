@@ -110,7 +110,9 @@ public static class ThemeManager
 
         var dictionary = new ResourceDictionary { Source = new Uri($"/LitePDF;component/Themes/{(dark ? "Dark" : "Light")}.xaml", UriKind.Relative) };
         var merged = Application.Current.Resources.MergedDictionaries;
-        if (_current is not null) merged.Remove(_current);
+        // Later merged dictionaries win lookups, so every palette (including the default one from App.xaml) must be
+        // removed before inserting the new one ahead of the styles.
+        foreach (var palette in merged.Where(IsPalette).ToList()) merged.Remove(palette);
         merged.Insert(0, dictionary);
         _current = dictionary;
         IsDark = dark;
@@ -118,6 +120,11 @@ public static class ThemeManager
         foreach (Window window in Application.Current.Windows) NativeWindow.ApplyTitleBarTheme(window);
         ThemeChanged?.Invoke();
     }
+
+    private static bool IsPalette(ResourceDictionary dictionary) =>
+        ReferenceEquals(dictionary, _current) ||
+        dictionary.Source?.OriginalString is { } source &&
+        (source.EndsWith("Light.xaml", StringComparison.OrdinalIgnoreCase) || source.EndsWith("Dark.xaml", StringComparison.OrdinalIgnoreCase));
 
     private static bool SystemUsesDarkTheme()
     {

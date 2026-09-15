@@ -408,6 +408,10 @@
                         <Trigger Property="Role" Value="SubmenuHeader">
                             <Setter TargetName="Arrow" Property="Visibility" Value="Visible"/>
                         </Trigger>
+                        <!-- Items placed directly in a ContextMenu get the top-level roles. -->
+                        <Trigger Property="Role" Value="TopLevelHeader">
+                            <Setter TargetName="Arrow" Property="Visibility" Value="Visible"/>
+                        </Trigger>
                         <Trigger Property="IsChecked" Value="True">
                             <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
                             <Setter TargetName="IconHost" Property="Visibility" Value="Collapsed"/>

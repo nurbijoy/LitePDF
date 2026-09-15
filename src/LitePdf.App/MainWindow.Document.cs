@@ -216,7 +216,11 @@ public partial class MainWindow
     private void LoadRecentList()
     {
         _vm.RecentFiles.Clear();
-        foreach (var entry in _recent.Items.Take(8))
+        var entries = _recent.Items
+            .Where(e => Path.IsPathFullyQualified(e.Path))
+            .DistinctBy(e => e.Path, StringComparer.OrdinalIgnoreCase)
+            .Take(8);
+        foreach (var entry in entries)
             _vm.RecentFiles.Add(new RecentItem(entry.Path, entry.LastOpened));
         RecentHeader.Visibility = _vm.RecentFiles.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }

@@ -133,6 +133,36 @@ public static class SampleDocuments
         return b.Build(catalog, info);
     }
 
+    /// <summary>A large text-only document (for performance checks) with one outline entry per 10 pages.</summary>
+    public static byte[] CreateLargeDocument(int pageCount)
+    {
+        var b = new SamplePdfBuilder();
+        int catalog = b.Reserve(), pages = b.Reserve(), outlines = b.Reserve();
+        int font = b.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+        var pageIds = new int[pageCount];
+        var outlineIds = new List<int>();
+        for (int p = 0; p < pageCount; p++)
+        {
+            pageIds[p] = b.Reserve();
+            var content = new StringBuilder($"BT /F1 20 Tf 72 730 Td (Section {p / 10 + 1}, page {p + 1}) Tj ET\n");
+            for (int line = 0; line < 40; line++)
+                content.Append($"BT /F1 10 Tf 72 {SamplePdfBuilder.F(700 - line * 16)} Td (Line {line + 1} of page {p + 1}: {Sentence} {Sentence}) Tj ET\n");
+            int stream = b.AddStream("", Encoding.Latin1.GetBytes(content.ToString()));
+            b.Set(pageIds[p], $"<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 612 792] /Contents {stream} 0 R /Resources << /Font << /F1 {font} 0 R >> >> >>");
+        }
+        for (int s = 0; s < pageCount; s += 10) outlineIds.Add(b.Reserve());
+        for (int i = 0; i < outlineIds.Count; i++)
+        {
+            string prev = i > 0 ? $" /Prev {outlineIds[i - 1]} 0 R" : "";
+            string next = i < outlineIds.Count - 1 ? $" /Next {outlineIds[i + 1]} 0 R" : "";
+            b.Set(outlineIds[i], $"<< /Title (Section {i + 1}) /Parent {outlines} 0 R{prev}{next} /Dest [{pageIds[i * 10]} 0 R /XYZ 0 792 0] >>");
+        }
+        b.Set(outlines, $"<< /Type /Outlines /First {outlineIds[0]} 0 R /Last {outlineIds[^1]} 0 R /Count {outlineIds.Count} >>");
+        b.Set(pages, $"<< /Type /Pages /Kids [{string.Join(' ', pageIds.Select(id => $"{id} 0 R"))}] /Count {pageCount} >>");
+        b.Set(catalog, $"<< /Type /Catalog /Pages {pages} 0 R /Outlines {outlines} 0 R >>");
+        return b.Build(catalog);
+    }
+
     /// <summary>A one-page "scan": an RGB image filling a Letter page, with no text layer.</summary>
     public static byte[] CreateImageDocument(byte[] rgb, int width, int height)
     {

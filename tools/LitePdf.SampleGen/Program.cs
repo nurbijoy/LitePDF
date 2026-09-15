@@ -17,4 +17,6 @@ await using (var doc = await PdfiumDocument.OpenAsync(textPath))
     File.WriteAllBytes(Path.Combine(output, "sample-scanned.pdf"), SampleDocuments.CreateImageDocument(SampleDocuments.BgraToRgb(bitmap.Pixels), w, h));
 }
 
+File.WriteAllBytes(Path.Combine(output, "sample-1000-pages.pdf"), SampleDocuments.CreateLargeDocument(1000));
+
 Console.WriteLine($"Samples written to {output}");

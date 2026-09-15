@@ -59,7 +59,14 @@ public partial class App : Application
 
         foreach (var theme in new[] { AppTheme.Light, AppTheme.Dark })
         {
-            Check($"theme {theme}", () => ThemeManager.Apply(theme));
+            Check($"theme {theme}", () =>
+            {
+                ThemeManager.Apply(theme);
+                var window = (System.Windows.Media.SolidColorBrush)Current.FindResource("Brush.Window");
+                bool isDarkColor = window.Color.R < 128;
+                if (isDarkColor != (theme == AppTheme.Dark))
+                    throw new InvalidOperationException($"Brush.Window is {window.Color} after applying {theme}.");
+            });
             foreach (var dictionary in Current.Resources.MergedDictionaries)
                 foreach (var key in dictionary.Keys.Cast<object>().ToList())
                     Check($"{theme} resource {key}", () => _ = dictionary[key]);

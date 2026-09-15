@@ -1,42 +1,52 @@
-# AGENTS.md — Start here (humans and AI assistants)
+# AGENTS.md — start here (humans and AI assistants)
 
-LitePDF is a lightweight Windows PDF reader: thumbnails, chapters (outline), on-device OCR, copy, highlights.
+LitePDF is a lightweight, private Windows reader for PDFs and scanned images: continuous reading, thumbnails,
+chapters, text selection/copy, search, on-device OCR (pages, areas, images), highlights/notes saved into the PDF.
 
 ## Read in this order
-1. `AGENTS.md` (this file): rules and commands
-2. `docs/BLUEPRINT.md`: architecture, contracts, algorithms (the source of truth)
-3. `TASKS.md`: ordered work queue with status and handoff notes. **Pick the first unchecked task.**
-4. `PLAN.md`: original high-level plan (background only)
+1. `AGENTS.md` (this file): commands, rules, verification
+2. `docs/BLUEPRINT.md`: architecture and the reasons behind it (source of truth)
+3. `TASKS.md`: what is done and verified, known gaps, next work
 
 ## Environment
-- Windows 10 19041+ / Windows 11, x64
-- .NET 10 SDK (`winget install Microsoft.DotNet.SDK.10`)
-- No Visual Studio required; VS Code + C# Dev Kit is optional
+- Windows 10 19041+ / Windows 11, x64. .NET 10 SDK (`winget install Microsoft.DotNet.SDK.10`).
+- No Visual Studio required.
 
-## Commands (run from the repo root)
+## Commands (repo root)
 ```
 dotnet build LitePDF.slnx
-dotnet run --project src/LitePdf.App -- "C:\path\file.pdf"
 dotnet test tests/LitePdf.Core.Tests
+dotnet run --project src/LitePdf.App -- "C:\path\file.pdf"
+src\LitePdf.App\bin\Debug\net10.0-windows10.0.19041.0\LitePDF.exe --self-test   # exit code 0 = pass
+dotnet run --project tools/LitePdf.SampleGen          # writes samples/generated/*.pdf (text, scanned, 1000 pages)
+powershell -File publish.ps1                           # portable ReadyToRun build in publish/, zipped
 ```
 
-## Rules
-1. **PDFium is not thread-safe.** Every PDFium call goes through `PdfiumWorker` (one thread). Never call `NativeMethods` directly from the UI or thread pool.
-2. **Layering:** `Core` references nothing. `Pdfium` and `Ocr` reference only `Core`. `App` references all three. UI types (WPF) exist only in `App`.
-3. **No network access, no telemetry.** All data stays in `%LocalAppData%\LitePDF\`.
-4. **Keep it lite.** Don't add a NuGet package when ~100 lines of code will do. Ask before adding heavy dependencies.
-5. **Units:** PDF points (1/72 in) in Core and Pdfium; DIPs and pixels only in App. See BLUEPRINT §5.
-6. **After finishing a task:**
-   - Tick it in `TASKS.md` and update the "Handoff notes" section.
-   - Commit with the message `T-XX: short description`.
-7. Put non-UI logic in `Core` and add xUnit tests for it.
-8. Match existing style: file-scoped namespaces, nullable enabled, `sealed` by default, minimal comments that explain *why*.
+## Definition of done for any change
+1. `dotnet build LitePDF.slnx` → 0 errors, 0 warnings.
+2. `dotnet test tests/LitePdf.Core.Tests` → all pass. Add tests for Core/Pdfium logic you touch.
+3. `LitePDF.exe --self-test` → `SELF-TEST PASSED` (instantiates every style/resource in both themes, the main window and
+   every dialog; WPF otherwise only reports XAML errors when a style is first used).
+4. UI changes: run the app against `samples/generated/*` and exercise the feature (mouse, keyboard, both themes).
+5. Update `TASKS.md` (and `docs/BLUEPRINT.md` if the design changed). Commit with a descriptive message.
 
-## Decisions (defaults chosen 2026-09-15; change only with the owner's approval)
+## Rules
+1. **PDFium is single-threaded.** All native calls go through `PdfiumWorker`. Never touch `Interop` from elsewhere.
+2. **Geometry is normalized page coordinates** (0..1, top-left, as displayed with the page's /Rotate and crop box).
+   Only `PdfiumDocument.PageFrame` converts to PDF user space; only the viewer converts to DIPs.
+3. **Layering:** `Core` has no dependencies and no UI types. `Pdfium` and `Ocr` depend only on `Core`. `App` is WPF.
+4. **No network access, no telemetry.** Data lives in `%LocalAppData%\LitePDF\` (settings, recent files, OCR cache, logs).
+5. **Never swallow exceptions silently.** Expected failures (cancellation, a document closed mid-render) are caught
+   explicitly; everything else goes to `Log` and `ErrorReporter`.
+6. **UI thread:** async/await only. No `Task.Run` + `Dispatcher.Invoke` round trips; renders return frozen bitmaps.
+7. **Keep it lite:** no new NuGet packages without a strong reason. Theme colors only via `DynamicResource Brush.*`.
+8. **Saving never overwrites in place:** write to a temp file in the target folder, then `File.Replace`.
+
+## Decisions
 | Topic | Decision |
 |---|---|
-| UI | WPF on .NET 10 |
-| PDF engine | PDFium (NuGet `bblanchon.PDFium.Win32`) via `LibraryImport` P/Invoke |
-| OCR | Windows.Media.Ocr behind `IOcrEngine`; Tesseract is an optional later addition for unsupported languages |
-| Highlights | Standard PDF annotations saved into the file (incremental save via temp file + replace) |
-| Distribution | Portable zip first (framework-dependent), installer later |
+| UI | WPF (.NET 10) with a custom Fluent-style theme (light/dark, follows Windows) |
+| PDF engine | PDFium (`bblanchon.PDFium.Win32`) via `LibraryImport` |
+| OCR | Windows.Media.Ocr (on-device); per-page JSON cache keyed by document ID |
+| Annotations | Standard PDF Highlight/Underline/StrikeOut/Text annotations, incremental save |
+| Distribution | Portable, framework-dependent ReadyToRun build (`publish.ps1`) |

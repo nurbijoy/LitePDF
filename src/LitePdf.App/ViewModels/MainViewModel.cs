@@ -288,7 +288,9 @@ public sealed class RecentItem(string path, DateTimeOffset lastOpened)
 {
     public string Path { get; } = path;
     public string FileName => System.IO.Path.GetFileName(Path);
-    public string Detail => $"{System.IO.Path.GetDirectoryName(Path)} · {Describe(lastOpened)}";
+    public string Detail => lastOpened.Year < 2000
+        ? System.IO.Path.GetDirectoryName(Path) ?? ""
+        : $"{System.IO.Path.GetDirectoryName(Path)} · {Describe(lastOpened)}";
 
     private static string Describe(DateTimeOffset time)
     {

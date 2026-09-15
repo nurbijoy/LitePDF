@@ -244,7 +244,9 @@ public sealed class PdfViewer : Border
         _panel.SetOffsetsForNewLayout(h, v);
     }
 
-    public void SetZoom(double zoom, Point? anchor = null) => ApplyZoom(ViewMath.ClampZoom(zoom), ZoomMode.Custom, anchor);
+    /// <summary>Sets a custom zoom, keeping the point under <paramref name="anchor"/> (default: viewport center) in place.</summary>
+    public void SetZoom(double zoom, Point? anchor = null) =>
+        ApplyZoom(ViewMath.ClampZoom(zoom), ZoomMode.Custom, anchor ?? new Point(_panel.ViewportWidth / 2, _panel.ViewportHeight / 2));
 
     public void ZoomIn() => SetZoom(ViewMath.ZoomIn(Zoom));
 

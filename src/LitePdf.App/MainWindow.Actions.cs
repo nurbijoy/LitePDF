@@ -117,15 +117,13 @@ public partial class MainWindow
         ShowToast(annotation.Kind == AnnotationKind.Note ? "Note deleted" : "Annotation deleted");
     }
 
-    private MenuItemList ColorMenu(string header, Action<AnnotationColor> apply, AnnotationColor? current)
+    private System.Windows.Controls.MenuItem ColorMenu(string header, Action<AnnotationColor> apply, AnnotationColor? current)
     {
         var menu = new System.Windows.Controls.MenuItem { Header = header, Icon = IconText(Icons.Highlight) };
         foreach (var (name, color) in AnnotationColor.Palette)
             menu.Items.Add(MenuItemFor(name, null, () => apply(color), isChecked: current == color, iconElement: ColorSwatch(color)));
-        return new MenuItemList(menu);
+        return menu;
     }
-
-    private readonly record struct MenuItemList(System.Windows.Controls.MenuItem Item);
 
     private void OnViewerContextRequested(ViewerContext context)
     {
@@ -139,7 +137,7 @@ public partial class MainWindow
             if (session.CanAnnotate)
             {
                 items.Add(MenuItemFor("Highlight", Icons.Highlight, () => Run(() => MarkSelectionAsync(AnnotationKind.Highlight)), "Ctrl+H"));
-                items.Add(ColorMenu("Highlight with", c => { _vm.HighlightColor = c; Run(() => MarkSelectionAsync(AnnotationKind.Highlight, c)); }, _vm.HighlightColor).Item);
+                items.Add(ColorMenu("Highlight with", c => { _vm.HighlightColor = c; Run(() => MarkSelectionAsync(AnnotationKind.Highlight, c)); }, _vm.HighlightColor));
                 items.Add(MenuItemFor("Underline", Icons.Underline, () => Run(() => MarkSelectionAsync(AnnotationKind.Underline)), "Ctrl+U"));
                 items.Add(MenuItemFor("Strikethrough", null, () => Run(() => MarkSelectionAsync(AnnotationKind.StrikeOut))));
             }
@@ -151,7 +149,7 @@ public partial class MainWindow
         if (context.Annotation is { } annotation)
         {
             if (annotation.Kind == AnnotationKind.Note) items.Add(MenuItemFor("Edit note…", Icons.Note, () => Run(() => EditNoteAsync(annotation))));
-            items.Add(ColorMenu("Change color", c => Run(() => session.SetAnnotationColorAsync(annotation, c)), annotation.Color).Item);
+            items.Add(ColorMenu("Change color", c => Run(() => session.SetAnnotationColorAsync(annotation, c)), annotation.Color));
             items.Add(MenuItemFor("Delete annotation", Icons.Delete, () => Run(() => DeleteAnnotationAsync(annotation)), "Del"));
             items.Add(null);
         }
@@ -310,7 +308,9 @@ public partial class MainWindow
     {
         if (_session is not { } session) return;
         var text = await session.GetTextAsync(page, RenderPriority.Interactive);
-        string value = text.VisibleCharCount >= DocumentSession.MinTextChars ? text.GetTextInRects([region]) : "";
+        string value = text.VisibleCharCount >= DocumentSession.MinTextChars
+            ? text.GetTextInRects([region], preserveLineBreaks: true).Replace("\n", Environment.NewLine)
+            : "";
         if (string.IsNullOrWhiteSpace(value))
         {
             if (!EnsureOcrAvailable()) return;

@@ -227,7 +227,8 @@ public sealed class PageText
     }
 
     /// <summary>Text whose character centers fall inside any of the rectangles (e.g. under a highlight).</summary>
-    public string GetTextInRects(IReadOnlyList<RectD> rects, double tolerance = 0.002)
+    /// <param name="preserveLineBreaks">Keep line breaks between lines (for copying) instead of joining with spaces (for lists).</param>
+    public string GetTextInRects(IReadOnlyList<RectD> rects, double tolerance = 0.002, bool preserveLineBreaks = false)
     {
         if (rects.Count == 0 || Length == 0) return string.Empty;
         var included = new bool[Length];
@@ -244,7 +245,8 @@ public sealed class PageText
             {
                 // Keep the separator between included runs (space or line break) readable.
                 string gap = Text[(last + 1)..i];
-                sb.Append(gap.Contains('\n') ? ' ' : gap.Any(char.IsWhiteSpace) ? " " : gap.Length <= 1 ? gap : " ");
+                if (gap.Contains('\n')) sb.Append(preserveLineBreaks ? '\n' : ' ');
+                else sb.Append(gap.Any(char.IsWhiteSpace) || gap.Length > 1 ? " " : gap);
             }
             sb.Append(Text[i]);
             last = i;
