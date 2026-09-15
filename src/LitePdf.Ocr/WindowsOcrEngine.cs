@@ -1,8 +1,7 @@
 #if WINDOWS
 using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.Graphics.Imaging;
-using Windows.Media.Ocr;
-using Windows.Storage.Streams;
+using WinOcr = Windows.Media.Ocr;
 using LitePdf.Core;
 
 namespace LitePdf.Ocr;
@@ -17,9 +16,9 @@ public sealed class WindowsOcrEngine : IOcrEngine
     {
         try
         {
-            var engine = OcrEngine.TryCreateFromUserProfileLanguages();
-            IsAvailable = engine != null || OcrEngine.AvailableRecognizerLanguages.Count > 0;
-            AvailableLanguages = OcrEngine.AvailableRecognizerLanguages.Select(l => l.LanguageTag).ToList();
+            var engine = WinOcr.OcrEngine.TryCreateFromUserProfileLanguages();
+            IsAvailable = engine != null || WinOcr.OcrEngine.AvailableRecognizerLanguages.Count > 0;
+            AvailableLanguages = WinOcr.OcrEngine.AvailableRecognizerLanguages.Select(l => l.LanguageTag).ToList();
         }
         catch
         {
@@ -32,17 +31,17 @@ public sealed class WindowsOcrEngine : IOcrEngine
     {
         if (!IsAvailable) throw new InvalidOperationException("OCR not available on this system.");
 
-        OcrEngine engine;
+        WinOcr.OcrEngine engine;
         if (!string.IsNullOrWhiteSpace(languageTag))
         {
             var lang = new Windows.Globalization.Language(languageTag);
-            engine = OcrEngine.TryCreateFromLanguage(lang) ?? OcrEngine.TryCreateFromUserProfileLanguages()
+            engine = WinOcr.OcrEngine.TryCreateFromLanguage(lang) ?? WinOcr.OcrEngine.TryCreateFromUserProfileLanguages()
                 ?? throw new InvalidOperationException($"Language {languageTag} not available.");
         }
         else
         {
-            engine = OcrEngine.TryCreateFromUserProfileLanguages()
-                ?? OcrEngine.TryCreateFromLanguage(OcrEngine.AvailableRecognizerLanguages.First())
+            engine = WinOcr.OcrEngine.TryCreateFromUserProfileLanguages()
+                ?? WinOcr.OcrEngine.TryCreateFromLanguage(WinOcr.OcrEngine.AvailableRecognizerLanguages.First())
                 ?? throw new InvalidOperationException("No OCR language available.");
         }
 
@@ -84,9 +83,17 @@ public sealed class WindowsOcrEngine : IOcrEngine
             height = clampedH;
         }
 
-        // Convert BGRA to SoftwareBitmap
-        var softwareBitmap = new SoftwareBitmap(BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Premultiplied);
-        softwareBitmap.CopyFromBuffer(pixels.AsBuffer());
+        // SoftwareBitmap needs a tight buffer (stride == width * 4); PDFium's alpha byte is undefined, so ignore alpha.
+        if (stride != width * 4)
+        {
+            var tight = new byte[width * height * 4];
+            for (int y = 0; y < height; y++)
+                System.Buffer.BlockCopy(pixels, y * stride, tight, y * width * 4, width * 4);
+            pixels = tight;
+        }
+
+        using var softwareBitmap = SoftwareBitmap.CreateCopyFromBuffer(
+            pixels.AsBuffer(0, width * height * 4), BitmapPixelFormat.Bgra8, width, height, BitmapAlphaMode.Ignore);
 
         var ocrResult = await engine.RecognizeAsync(softwareBitmap).AsTask(ct).ConfigureAwait(false);
 

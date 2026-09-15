@@ -233,7 +233,6 @@ public sealed class MainViewModel : ObservableObject
         set => SetProperty(ref _pageMode, value);
     }
 
-    public enum PageMode { Normal, Dark, Sepia }
 
     // Events for view
     public event Action<int>? RequestGoToPage;

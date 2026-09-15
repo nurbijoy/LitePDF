@@ -200,9 +200,7 @@ public partial class PageView : UserControl
         // Convert PDF points to DIP: dip = points * zoom * 96/72
         // But also need to map Y: PDF origin bottom-left, DIP origin top-left
         // So: dipY = (pageHeight - top) * zoom * 96/72 for top edge
-        double dipLeft = ViewMath.ToDip(left, _vm.Zoom / _vm.DpiScale); // Wait: PageViewModel.DipWidth already includes zoom, but ViewMath.ToDip uses zoom. Let's use direct formula
-        // Actually Dip = points * zoom * 96/72. PageViewModel.DipWidth = PageSize.Width * zoom * 96/72
-        // So we can compute factor = DipWidth / PageWidth
+        // DipWidth already includes zoom, so scale by DIP-per-point on each axis.
         double factorX = _vm.DipWidth / _vm.PageSize.Width;
         double factorY = _vm.DipHeight / _vm.PageSize.Height;
 

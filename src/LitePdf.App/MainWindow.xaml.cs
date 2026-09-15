@@ -1,3 +1,4 @@
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -467,6 +468,7 @@ public partial class MainWindow : Window
                     pageVm.OnRealized(_vm.RenderPageForVmAsync, _vm.BitmapCache, priority);
 
                     var thumbVm = _vm.Thumbnails[i];
+                    int pageIndex = i; // copy: the task below must not capture the loop variable
                     if (thumbVm.Bitmap == null)
                     {
                         _ = Task.Run(async () =>
@@ -476,7 +478,7 @@ public partial class MainWindow : Window
                                 int thumbW = 140;
                                 double aspect = pageVm.PageSize.Height / pageVm.PageSize.Width;
                                 int thumbH = (int)(thumbW * aspect);
-                                var bmp = await _vm.RenderPageForVmAsync(i, thumbW, thumbH, LitePdf.Core.RenderFlags.None, RenderPriority.Thumbnail, CancellationToken.None);
+                                var bmp = await _vm.RenderPageForVmAsync(pageIndex, thumbW, thumbH, LitePdf.Core.RenderFlags.None, RenderPriority.Thumbnail, CancellationToken.None);
                                 Dispatcher.Invoke(() =>
                                 {
                                     try
@@ -620,7 +622,3 @@ public partial class MainWindow : Window
     }
 }
 
-public static class VirtualizingPanelExtensions
-{
-    public static void BringIndexIntoViewPublic(this VirtualizingStackPanel panel, int index) => panel.BringIndexIntoView(index);
-}

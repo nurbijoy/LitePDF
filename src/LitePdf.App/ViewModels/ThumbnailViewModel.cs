@@ -6,6 +6,7 @@ namespace LitePdf.App.ViewModels;
 public sealed class ThumbnailViewModel : ObservableObject
 {
     public int Index { get; }
+    public int Number => Index + 1;
     public PageSize PageSize { get; }
 
     private WriteableBitmap? _bitmap;

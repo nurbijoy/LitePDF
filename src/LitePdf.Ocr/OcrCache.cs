@@ -135,11 +135,11 @@ public sealed class OcrCache
             byte[] tail = new byte[Math.Min(65536, len)];
             using (var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                fs.Read(head, 0, head.Length);
+                fs.ReadExactly(head);
                 if (len > head.Length)
                 {
                     fs.Seek(-tail.Length, SeekOrigin.End);
-                    fs.Read(tail, 0, tail.Length);
+                    fs.ReadExactly(tail);
                 }
             }
             using var sha = SHA256.Create();

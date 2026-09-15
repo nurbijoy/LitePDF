@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using LitePdf.App.Services;
+using BitmapCache = LitePdf.App.Services.BitmapCache;
 using LitePdf.Core;
 using LitePdf.Core.Text;
 
