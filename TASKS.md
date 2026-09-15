@@ -11,16 +11,16 @@ Legend: `[x]` done · `[~]` partly done (see notes) · `[ ]` todo
 ---
 
 ## Handoff notes (update every session)
-- **Last updated:** 2026-09-15 (session 1, Claude)
-- **State:** blueprint written. Scaffold, PDFium wrapper, Windows OCR engine and basic WPF viewer are being built in session 1. See the task ticks below.
-- **Next up:** first unchecked task.
-- **Known issues / notes:** (none yet)
-- **Environment:** .NET SDK 10.0.401 is at `C:\Program Files\dotnet`. If `dotnet` isn't found, restart the terminal so it picks up the PATH.
+- **Last updated:** 2026-09-15 (session 1)
+- **State:** T-01 complete. Solution scaffold, Core types, App entry point, ViewMath unit tests passing under xUnit v3 MTP runner.
+- **Next up:** T-02 PDFium wrapper.
+- **Known issues / notes:** Tests use xUnit v3 standalone MTP runner configured via global.json to avoid Smart App Control blocking testhost.exe.
+- **Environment:** .NET SDK 10.0.401 is at `C:\Program Files\dotnet`.
 
 ---
 
 ## Phase 0 — Setup & spike
-- [ ] **T-01** Solution scaffold: `LitePDF.slnx`, `Directory.Build.props`, the 4 src projects and the tests project (BLUEPRINT §2)
+- [x] **T-01** Solution scaffold: `LitePDF.slnx`, `Directory.Build.props`, the 4 src projects and the tests project (BLUEPRINT §2)
 - [ ] **T-02** PDFium wrapper: `NativeMethods`, `PdfiumWorker`, `FileAccessBridge`, `PdfiumDocument` (open, sizes, render, outline, page text, char count) (§4, §7)
 - [ ] **T-03** `WindowsOcrEngine` (§6 Ocr contract)
 - [ ] **T-04** Smoke tests: generated PDF → open/render/text/outline; render → OCR finds the word. Record OCR ms/page in the notes above

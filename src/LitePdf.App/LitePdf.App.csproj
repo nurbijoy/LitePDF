@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>LitePDF</AssemblyName>
+    <RootNamespace>LitePdf.App</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\LitePdf.Core\LitePdf.Core.csproj" />
+    <ProjectReference Include="..\LitePdf.Pdfium\LitePdf.Pdfium.csproj" />
+    <ProjectReference Include="..\LitePdf.Ocr\LitePdf.Ocr.csproj" />
+  </ItemGroup>
+
+</Project>

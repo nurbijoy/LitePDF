@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LitePdf.App/LitePdf.App.csproj" />
+    <Project Path="src/LitePdf.Core/LitePdf.Core.csproj" />
+    <Project Path="src/LitePdf.Ocr/LitePdf.Ocr.csproj" />
+    <Project Path="src/LitePdf.Pdfium/LitePdf.Pdfium.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LitePdf.Core.Tests/LitePdf.Core.Tests.csproj" />
+  </Folder>
+</Solution>
