@@ -386,7 +386,7 @@ public sealed class SettingsDialog : DialogWindow
         ocr.Children.Add(clear);
 
         var about = Section("About");
-        about.Children.Add(Paragraph($"LitePDF {typeof(SettingsDialog).Assembly.GetName().Version?.ToString(3)} · PDF rendering by PDFium · No data leaves your device."));
+        about.Children.Add(Paragraph($"{AppInfo.Name} {AppInfo.Version} · PDF rendering by PDFium · No data leaves your device."));
 
         SetBody(body, MakeButton("Done", accent: true, isDefault: true, isCancel: true, onClick: () => DialogResult = true));
     }

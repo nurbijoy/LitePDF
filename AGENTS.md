@@ -19,9 +19,10 @@ dotnet test tests/LitePdf.Core.Tests
 dotnet run --project src/LitePdf.App -- "C:\path\file.pdf"
 src\LitePdf.App\bin\Debug\net10.0-windows10.0.19041.0\LitePDF.exe --self-test   # exit code 0 = pass
 dotnet run --project tools/LitePdf.SampleGen          # writes samples/generated/*.pdf (text, scanned, 1000 pages)
-powershell -File publish.ps1                           # self-contained build -> dist/LitePDF-<ver>-setup.exe + portable zip
-powershell -File publish.ps1 -FrameworkDependent       # ~33 MB instead of 194 MB, but needs .NET 10 on the target PC
-powershell -File publish.ps1 -NoInstaller              # portable zip only (no Inno Setup needed)
+# Windows blocks unsigned local scripts, so publish needs -ExecutionPolicy Bypass (this run only):
+powershell -ExecutionPolicy Bypass -File publish.ps1                      # -> dist/LitePDF-<ver>-setup.exe + portable zip
+powershell -ExecutionPolicy Bypass -File publish.ps1 -FrameworkDependent  # ~33 MB, but needs .NET 10 on the target PC
+powershell -ExecutionPolicy Bypass -File publish.ps1 -NoInstaller         # portable zip only (no Inno Setup needed)
 ```
 
 ## Definition of done for any change
@@ -52,3 +53,4 @@ powershell -File publish.ps1 -NoInstaller              # portable zip only (no I
 | OCR | Windows.Media.Ocr (on-device); per-page JSON cache keyed by document ID |
 | Annotations | Standard PDF Highlight/Underline/StrikeOut/Text annotations, incremental save |
 | Distribution | Inno Setup installer around a self-contained ReadyToRun build, plus a portable zip (`publish.ps1`). Self-contained so a target PC needs nothing installed: .NET 10 is new enough that few have the runtime |
+| Naming | `Product` in `LitePdf.App.csproj` is the display name and the only place it is set (`AppInfo.Name` reads it). `AssemblyName`, the ProgID, the registry keys and `%LocalAppData%\LitePDF` all stay `LitePDF` with no space, and must not follow a rename |

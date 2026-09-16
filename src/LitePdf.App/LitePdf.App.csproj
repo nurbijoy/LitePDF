@@ -15,11 +15,13 @@
 
     <!-- Shown by Explorer, the taskbar, Start menu and the installer. -->
     <ApplicationIcon>Assets\LitePDF.ico</ApplicationIcon>
-    <Product>LitePDF</Product>
-    <AssemblyTitle>LitePDF</AssemblyTitle>
-    <Company>LitePDF</Company>
+    <!-- Product is the display name: AppInfo reads it, so this is the one place the app is named.
+         AssemblyName stays LitePDF (no space): it is the exe name, the ProgID and the WPF resource URI. -->
+    <Product>Lite PDF</Product>
+    <AssemblyTitle>Lite PDF</AssemblyTitle>
+    <Company>Nur Innovative Solutions</Company>
     <Description>A lightweight, private PDF and scan reader for Windows.</Description>
-    <Copyright>Copyright (c) 2026</Copyright>
+    <Copyright>Copyright (c) 2026 Nur Innovative Solutions</Copyright>
   </PropertyGroup>
 
   <ItemGroup>

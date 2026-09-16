@@ -9,6 +9,9 @@ param(
     [switch]$NoInstaller
 )
 
+# Run it with:  powershell -ExecutionPolicy Bypass -File publish.ps1
+# (Windows blocks unsigned local scripts by default; Bypass applies to this one run only.)
+#
 # ReadyToRun precompiles the app for faster startup.
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
@@ -30,6 +33,7 @@ if (-not $version) { $version = "1.0.0" }
 
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 $zip = Join-Path $dist "LitePDF-$version-$Runtime-portable.zip"
+# Delete first: a leftover from an earlier build would otherwise be reported as this one.
 if (Test-Path $zip) { Remove-Item $zip -Force }
 Compress-Archive -Path (Join-Path $out "*") -DestinationPath $zip -CompressionLevel Optimal
 
@@ -50,12 +54,18 @@ if (-not $iscc) {
     return
 }
 
+# The setup filename is decided here and passed in, so this script always knows what it produced.
+$setupName = "LitePDF-$version-setup"
+$setup = Join-Path $dist "$setupName.exe"
+if (Test-Path $setup) { Remove-Item $setup -Force }
+
 & $iscc /Qp `
     "/DAppVersion=$version" `
     "/DSourceDir=$out" `
     "/DOutputDir=$dist" `
+    "/DOutputBaseName=$setupName" `
     (Join-Path $root "installer/LitePDF.iss") | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+if (-not (Test-Path $setup)) { throw "Inno Setup reported success but $setup is not there" }
 
-$setup = Join-Path $dist "LitePDF-$version-setup.exe"
 "Installer: {0:N0} MB -> {1}" -f ((Get-Item $setup).Length / 1MB), $setup | Write-Host

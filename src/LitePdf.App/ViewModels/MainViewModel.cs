@@ -60,7 +60,7 @@ public sealed class MainViewModel : ObservableObject
 
     public bool IsDirty { get => _isDirty; set { if (Set(ref _isDirty, value)) OnPropertyChanged(nameof(WindowTitle)); } }
 
-    public string WindowTitle => HasDocument ? $"{(IsDirty ? "● " : "")}{FileName} – LitePDF" : "LitePDF";
+    public string WindowTitle => HasDocument ? $"{(IsDirty ? "● " : "")}{FileName} – {AppInfo.Name}" : AppInfo.Name;
 
     public bool CanSave { get => _canSave; set => Set(ref _canSave, value); }
 

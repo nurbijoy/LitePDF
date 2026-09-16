@@ -4,6 +4,7 @@
         xmlns:viewer="clr-namespace:LitePdf.App.Viewer"
         xmlns:vm="clr-namespace:LitePdf.App.ViewModels"
         xmlns:views="clr-namespace:LitePdf.App.Views"
+        xmlns:infra="clr-namespace:LitePdf.App.Infrastructure"
         Style="{StaticResource AppWindow}"
         Title="{Binding WindowTitle}"
         Icon="Assets/LitePDF.ico"
@@ -264,7 +265,7 @@
                         <Border Width="64" Height="64" CornerRadius="16" Background="{DynamicResource Brush.Accent}" HorizontalAlignment="Left">
                             <TextBlock Text="&#xE8A5;" Style="{StaticResource Icon}" FontSize="30" Foreground="{DynamicResource Brush.OnAccent}"/>
                         </Border>
-                        <TextBlock Text="LitePDF" FontSize="34" FontWeight="SemiBold" Margin="0,20,0,4"/>
+                        <TextBlock Text="{x:Static infra:AppInfo.Name}" FontSize="34" FontWeight="SemiBold" Margin="0,20,0,4"/>
                         <TextBlock Text="A fast, private reader for PDFs and scanned images. Everything, including text recognition, stays on this device."
                                    Style="{StaticResource Caption}" FontSize="14" TextWrapping="Wrap"/>
                         <StackPanel Orientation="Horizontal" Margin="0,28,0,0">

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -10,6 +11,24 @@ using LitePdf.Core.Storage;
 using Microsoft.Win32;
 
 namespace LitePdf.App.Infrastructure;
+
+/// <summary>
+/// What the application calls itself. Taken from the assembly, so the project file is the single place the
+/// name and version are set. This is the display name only: the folder under %LocalAppData% that holds
+/// settings and the OCR cache is <see cref="Core.Storage.AppPaths"/>'s own constant, and renaming the app
+/// must not send it looking somewhere new.
+/// </summary>
+public static class AppInfo
+{
+    private static readonly Assembly Self = typeof(AppInfo).Assembly;
+
+    public static string Name { get; } =
+        Self.GetCustomAttribute<AssemblyProductAttribute>()?.Product is { Length: > 0 } product
+            ? product
+            : "LitePDF";
+
+    public static string Version { get; } = Self.GetName().Version?.ToString(3) ?? "1.0";
+}
 
 public static class Log
 {
@@ -62,14 +81,14 @@ public static class ErrorReporter
             if (owner is { IsLoaded: true })
                 Views.MessageDialog.Show(owner, "Something went wrong", message, Views.MessageDialogButtons.Ok, isError: true);
             else
-                MessageBox.Show(message, "LitePDF", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show(message, AppInfo.Name, MessageBoxButton.OK, MessageBoxImage.Error);
         }
         catch (Exception dialogError)
         {
             Log.Error(dialogError, "Showing error dialog");
             try
             {
-                MessageBox.Show(message, "LitePDF", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show(message, AppInfo.Name, MessageBoxButton.OK, MessageBoxImage.Error);
             }
             catch (Exception)
             {

@@ -99,10 +99,17 @@ Order of work in `WindowsOcrEngine.RecognizeAsync`:
 
 ## 5b. Distribution
 - **`publish.ps1`** publishes, runs `--self-test` against the published build, writes a portable zip, then
-  builds the installer with Inno Setup. Everything lands in `dist/`.
+  builds the installer with Inno Setup. Everything lands in `dist/`. Run it with `-ExecutionPolicy Bypass`:
+  Windows refuses unsigned local scripts by default. It deletes each artifact before writing it and checks the
+  installer is there afterwards, so a stale build can never be reported as a fresh one.
 - **Self-contained by default** (194 MB on disk, 55 MB installer). Framework-dependent is 33 MB but needs the
   .NET 10 Desktop Runtime, which few PCs have yet; `-FrameworkDependent` selects it.
-- **`installer/LitePDF.iss`** installs per-user under `%LocalAppData%\Programs\LitePDF` with no UAC prompt
+- **Display name vs identifier.** `AppName` in the .iss is what people read; `AppSlug` (`LitePDF`, no space)
+  is what Windows stores: the ProgID, the registry subkeys, the `RegisteredApplications` entry, the setup
+  filename and the data folder to clean up. They are separate because a ProgID with a space in it is trouble,
+  and because the data folder has to keep matching `AppPaths.Root` however the app is renamed. In the app the
+  same split holds: `Product` in the project file drives `AppInfo.Name`, while `AssemblyName` stays `LitePDF`.
+- **`installer/LitePDF.iss`** installs per-user under `%LocalAppData%\Programs` with no UAC prompt
   (`PrivilegesRequired=lowest`), or for all users when run as admin.
   - Start menu shortcut always; desktop shortcut and PDF association are opt-out tasks.
   - PDF association registers LitePDF as a *candidate*: `Applications\LitePDF.exe`, a `LitePDF.Document`
