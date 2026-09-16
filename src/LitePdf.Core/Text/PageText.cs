@@ -80,9 +80,16 @@ public sealed class PageText
                 }
 
                 string t = word.Text.Trim();
+                // Boxes measured off the page when the glyphs could be told apart, an even split otherwise.
+                var measured = word.CharBounds is { } glyphs && glyphs.Count == t.Length ? glyphs : null;
                 double charWidth = word.Bounds.Width / t.Length;
                 for (int i = 0; i < t.Length; i++)
                 {
+                    if (measured is not null)
+                    {
+                        Add(t[i], measured[i]);
+                        continue;
+                    }
                     double left = word.Bounds.Left + i * charWidth;
                     Add(t[i], new RectD(left, word.Bounds.Top, left + charWidth, word.Bounds.Bottom));
                 }

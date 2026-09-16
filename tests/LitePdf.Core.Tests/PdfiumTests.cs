@@ -249,6 +249,8 @@ public sealed class OcrTests(ITestOutputHelper output)
         cache.Set(0, result);
         Assert.True(cache.TryGet(0, out var cached));
         Assert.Equal(result.Text, cached.Text);
+        Assert.Equal(result.Figures.Count, cached.Figures.Count);
+        Assert.Equal(result.Lines.Select(l => l.Kind), cached.Lines.Select(l => l.Kind));
         Assert.Contains(0, cache.CachedPages);
         cache.Clear();
         Assert.False(cache.Contains(0));

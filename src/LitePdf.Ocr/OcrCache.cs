@@ -10,7 +10,7 @@ namespace LitePdf.Ocr;
 /// </summary>
 public sealed class OcrCache
 {
-    private const int FormatVersion = 2;
+    private const int FormatVersion = 3;
     private readonly string _directory;
     private readonly object _gate = new();
     private HashSet<int>? _pages;
@@ -50,12 +50,14 @@ public sealed class OcrCache
             return false;
         }
 
-        result = new OcrPageResult(file.Language, file.Lines
-            .Select(l => new OcrLine(l.Words
-                .Where(w => w.B.Length == 4)
-                .Select(w => new OcrWord(w.T, new RectD(w.B[0], w.B[1], w.B[2], w.B[3])))
-                .ToList()))
-            .ToList());
+        result = new OcrPageResult(
+            file.Language,
+            file.Lines
+                .Select(l => new OcrLine(
+                    l.Words.Where(w => w.B.Length == 4).Select(w => new OcrWord(w.T, ToRect(w.B))).ToList(),
+                    (OcrLineKind)l.K))
+                .ToList(),
+            file.Figures.Where(f => f.Length == 4).Select(ToRect).ToList());
         return true;
     }
 
@@ -65,14 +67,14 @@ public sealed class OcrCache
         {
             Version = FormatVersion,
             Language = result.LanguageTag,
+            // Per-character boxes are not kept: they would multiply the size of every page on disk, and without
+            // them selection falls back to splitting a word evenly, which is what it did before they existed.
             Lines = result.Lines.Select(l => new CachedLine
             {
-                Words = l.Words.Select(w => new CachedWord
-                {
-                    T = w.Text,
-                    B = [Math.Round(w.Bounds.Left, 5), Math.Round(w.Bounds.Top, 5), Math.Round(w.Bounds.Right, 5), Math.Round(w.Bounds.Bottom, 5)],
-                }).ToList(),
+                K = (int)l.Kind,
+                Words = l.Words.Select(w => new CachedWord { T = w.Text, B = Round(w.Bounds) }).ToList(),
             }).ToList(),
+            Figures = result.Figures.Select(Round).ToList(),
         };
         JsonFile.Write(PagePath(pageIndex), file);
         lock (_gate) LoadIndex().Add(pageIndex);
@@ -94,6 +96,11 @@ public sealed class OcrCache
         }
     }
 
+    private static double[] Round(RectD r) =>
+        [Math.Round(r.Left, 5), Math.Round(r.Top, 5), Math.Round(r.Right, 5), Math.Round(r.Bottom, 5)];
+
+    private static RectD ToRect(double[] b) => new(b[0], b[1], b[2], b[3]);
+
     private string PagePath(int pageIndex) => Path.Combine(_directory, $"{pageIndex}.json");
 
     private HashSet<int> LoadIndex()
@@ -112,10 +119,14 @@ public sealed class OcrCache
         public int Version { get; set; }
         public string Language { get; set; } = "";
         public List<CachedLine> Lines { get; set; } = [];
+        public List<double[]> Figures { get; set; } = [];
     }
 
     private sealed class CachedLine
     {
+        /// <summary><see cref="OcrLineKind"/>.</summary>
+        public int K { get; set; }
+
         public List<CachedWord> Words { get; set; } = [];
     }
 

@@ -363,6 +363,19 @@ public sealed class SettingsDialog : DialogWindow
         ocr.Children.Add(Paragraph(ocrLanguages.Count == 0
             ? "No recognition languages are installed. Add a language in Windows Settings › Time & language › Language & region, including its optical character recognition feature."
             : "Recognition runs entirely on this device. To add languages, install them in Windows Settings › Time & language › Language & region.", 460));
+
+        var advanced = new CheckBox
+        {
+            Content = "Analyse page layout while recognizing",
+            IsChecked = settings.OcrAdvancedLayout,
+            Margin = new Thickness(0, 8, 0, 0),
+        };
+        advanced.Click += (_, _) => settings.OcrAdvancedLayout = advanced.IsChecked == true;
+        ocr.Children.Add(advanced);
+        ocr.Children.Add(Paragraph("Cleans up scans before reading them, rebuilds stacked fractions, exponents " +
+            "and degree signs, marks diagrams, and puts lines back in reading order. Turn off for the plain " +
+            "output of the Windows recognizer.", 460));
+
         var clear = MakeButton("Clear recognized text cache", onClick: () =>
         {
             clearOcrCache();

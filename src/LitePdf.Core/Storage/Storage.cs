@@ -87,12 +87,21 @@ public sealed class AppSettings
     public PageColorMode PageColorMode { get; set; } = PageColorMode.Normal;
     public ZoomMode DefaultZoomMode { get; set; } = ZoomMode.FitWidth;
     public string? OcrLanguage { get; set; }
+
+    /// <summary>
+    /// Clean up scans before recognizing them and rebuild fractions, exponents, figures and reading order
+    /// afterwards. Off gives the recognizer's own output, which is faster and occasionally more predictable.
+    /// </summary>
+    public bool OcrAdvancedLayout { get; set; } = true;
+
     public bool RestoreLastPosition { get; set; } = true;
     public bool SidebarOpen { get; set; } = true;
     public double SidebarWidth { get; set; } = 260;
     public string SidebarPanel { get; set; } = "Thumbnails";
     public string HighlightColor { get; set; } = AnnotationColor.Yellow.ToHex();
     public WindowPlacement? Window { get; set; }
+
+    public OcrOptions OcrOptions() => OcrAdvancedLayout ? Core.OcrOptions.Default : Core.OcrOptions.Plain;
 
     public static AppSettings Load() => JsonFile.Read<AppSettings>(AppPaths.SettingsFile) ?? new AppSettings();
 

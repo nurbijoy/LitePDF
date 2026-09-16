@@ -33,6 +33,13 @@ Everything above the PDFium layer uses **normalized page coordinates**: `RectD` 
 | `TextMatcher` | Case/accent-insensitive search; whitespace runs (incl. line breaks) match one space; whole-word option; line-limited snippets |
 | `DocumentLayout` | Exact page rectangles for single/two-page continuous layout, visible range, hit test, nearest page, fit sizes |
 | `BitmapOps` | Dark (invert + hue rotate, compressed range) and sepia page modes, bilinear resize, crop |
+| `ScanPreprocessor` | Cleans a scan for recognition: colour pen marks read as paper, background divided out (show-through, uneven lighting), deskew, contrast stretched around the measured ink/paper split. `ScanPage` carries the grey image, the ink mask, and the map back to the page |
+| `SkewEstimator` | Shears the baseline points and keeps the angle whose horizontal projection is spikiest |
+| `ConnectedComponents` | Run-length 8-connected labelling of the ink mask into `InkBlob`s |
+| `PageStructure` | What the ink is: glyph height, per-character boxes for a recognized word, thin rules, text columns, and (given the recognized lines) figure regions |
+| `MathLayout` | Bars with type stacked above and below: the stacked fractions on the page |
+| `FractionSheet` | Lays every fraction half out as lines of type on one sheet for a second recognition pass, and reads the words back by position |
+| `OcrLayout` | Rebuilds the page from the recognizer's words: reading order by column, fractions, exponents, degree signs, figures |
 | `Storage` | `AppPaths`, atomic `JsonFile`, `AppSettings`, `RecentFileStore` (reading position per file), `DocumentKey` |
 
 ## 4. PDFium (`LitePdf.Pdfium`)
@@ -52,10 +59,43 @@ Everything above the PDFium layer uses **normalized page coordinates**: `RectD` 
 - **Save:** `FPDF_SaveAsCopy` incremental, falling back to a full save. `SaveCopyAsync` refuses the open path; see §6 for replacing the file.
 
 ## 5. OCR (`LitePdf.Ocr`)
-- **`WindowsOcrEngine`:** keeps one engine per language. Images larger than `MaxImageDimension` are resized. Word boxes are normalized to the bitmap.
-- **`OcrCache`:** `%LocalAppData%\LitePDF\ocr\{documentKey}\{page}.json` holds normalized word boxes, one file per page.
-- **Pages:** rendered at 300 DPI, long side capped at 4200 px.
-- **Regions:** at least 300 DPI, and upscaled up to 4× so small areas are at least 1400 px wide.
+`Windows.Media.Ocr` reads horizontal lines of type and nothing else. On a scanned page that leaves four things
+broken, and each is fixed outside the recognizer, from the measured geometry of the ink rather than from the
+words: a stacked fraction comes back as unrelated fragments or a stray dash, an exponent and a degree sign come
+back as ordinary digits, a diagram leaks stray labels into the prose, and the lines arrive in no useful order.
+`OcrOptions` turns the whole of it off (`OcrOptions.Plain`), which is what the settings toggle does.
+
+Order of work in `WindowsOcrEngine.RecognizeAsync`:
+1. `ScanPreprocessor.Prepare` — clean and straighten the page.
+2. `PageStructure.Analyze` — blobs, glyph height, rules, columns. Needs no text, so it can run first.
+3. `MathLayout.FindFractions` — bars with type stacked close above and below.
+4. Blank those regions out of the page image, then recognize it. Left in, their digits come back as fragments
+   that cannot be told apart from the words they sit between.
+5. Recognize the `FractionSheet` — every half laid out side by side as one line of type. A lone digit
+   surrounded by paper is what the recognizer drops; in a line it is read reliably.
+6. `PageStructure.FindFigures` — now that the text is known, drawing-like ink that prose runs through is a pen
+   mark, and ink holding rows of text is a table. What is left is a figure.
+7. `OcrLayout.Rebuild` — group into lines, mark scripts against a locally measured baseline, order by column,
+   and map every rectangle back through the deskew.
+
+- **`OcrCache`:** `%LocalAppData%\LitePDF\ocr\{documentKey}\{page}.json`, one file per page: word boxes,
+  line kind and figure rectangles. Per-character boxes are not kept — they would multiply the size of every
+  page on disk, and without them selection falls back to splitting a word evenly.
+- **Pages:** rendered at 400 DPI, long side capped at 5200 px. Scans in the wild are 200–300 DPI; rendering
+  above that gives the recognizer whole pixels for small type without inventing detail.
+- **Regions:** at least 400 DPI, and upscaled up to 4× so small areas are at least 1400 px wide.
+- **Cost:** about 1.2 s a page against 0.5 s for the recognizer alone.
+
+### Why these rules and not others
+- **Scripts are digits only.** An exponent or an index in a scanned book is nearly always a digit, whereas a
+  short letter measuring as raised is nearly always the baseline being off by a pixel. Marking the letter up
+  corrupts an ordinary word, so it is left alone.
+- **The baseline is local.** A page photographed out of a bound book does not merely tilt, it curves. Against
+  any straight reference, whole runs of glyphs at one end of a line look raised.
+- **Lines are grown left to right, from the last word on each.** A band that grew with every word would reach
+  its neighbours and chain paragraphs into one line.
+- **A figure is settled after the text is read.** Before it, a circled question number and a ruled table both
+  look exactly like a drawing.
 
 ## 6. App (`LitePdf.App`)
 ```
@@ -114,7 +154,8 @@ MainWindow*.cs           Window controller split by area: core (keys, menus, lay
 
 ## 7. Persistence
 `%LocalAppData%\LitePDF\`:
-- `settings.json`: theme, page color mode, default zoom, OCR language, sidebar, highlight color, window placement.
+- `settings.json`: theme, page color mode, default zoom, OCR language, OCR layout analysis, sidebar,
+  highlight color, window placement.
 - `recent.json`: up to 30 entries with reading positions.
 - `ocr\`: recognized text cache.
 - `logs\litepdf.log`: 1 MB rolling log.

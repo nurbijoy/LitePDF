@@ -207,6 +207,42 @@ public sealed class PageTextTests
     }
 
     [Fact]
+    public void From_ocr_uses_measured_character_boxes_when_it_has_them()
+    {
+        // A word whose glyphs were measured on the page: the last one is a raised exponent, not a third of the box.
+        var ocr = new OcrPageResult("en-US",
+        [
+            new OcrLine([new OcrWord("x^3", new RectD(0.1, 0.10, 0.16, 0.14),
+            [
+                new RectD(0.100, 0.120, 0.130, 0.140),
+                new RectD(0.132, 0.100, 0.160, 0.118),
+                new RectD(0.132, 0.100, 0.160, 0.118),
+            ])]),
+        ]);
+
+        var t = PageText.FromOcr(0, ocr);
+
+        Assert.Equal("x^3", t.Text);
+        Assert.True(t.TryGetBox(2, out var exponent));
+        Assert.Equal(0.100, exponent.Top, 5);
+        Assert.True(t.TryGetBox(0, out var body));
+        Assert.True(body.Top > exponent.Top);
+    }
+
+    [Fact]
+    public void From_ocr_falls_back_to_an_even_split_without_character_boxes()
+    {
+        var ocr = new OcrPageResult("en-US",
+            [new OcrLine([new OcrWord("abc", new RectD(0.1, 0.1, 0.4, 0.2))])]);
+
+        var t = PageText.FromOcr(0, ocr);
+
+        Assert.True(t.TryGetBox(1, out var middle));
+        Assert.Equal(0.2, middle.Left, 5);
+        Assert.Equal(0.3, middle.Right, 5);
+    }
+
+    [Fact]
     public void Selection_spans_pages()
     {
         var range = new TextRange(new TextPosition(3, 10), new TextPosition(1, 5));

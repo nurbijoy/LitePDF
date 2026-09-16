@@ -54,7 +54,7 @@ public partial class MainWindow
         {
             try
             {
-                session = await DocumentSession.OpenAsync(path, password, _ocr, () => _settings.OcrLanguage);
+                session = await DocumentSession.OpenAsync(path, password, _ocr, () => _settings.OcrLanguage, () => _settings.OcrOptions());
                 break;
             }
             catch (PdfiumException ex) when (ex.Error == PdfiumError.Password)
@@ -266,7 +266,7 @@ public partial class MainWindow
             return;
         }
         var document = ImageDocument.FromBitmap(image, "Pasted image");
-        await AttachSessionAsync(DocumentSession.FromImage(document, "Pasted image", _ocr, () => _settings.OcrLanguage), null);
+        await AttachSessionAsync(DocumentSession.FromImage(document, "Pasted image", _ocr, () => _settings.OcrLanguage, () => _settings.OcrOptions()), null);
     }
 
     private async Task<bool> ConfirmDiscardChangesAsync()

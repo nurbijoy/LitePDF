@@ -20,6 +20,7 @@ public sealed class DocumentSession : IAsyncDisposable
 
     private readonly IOcrEngine _ocr;
     private readonly Func<string?> _ocrLanguage;
+    private readonly Func<OcrOptions> _ocrOptions;
     private readonly LruCache<int, PageText> _pdfText = new(48);
     private readonly ConcurrentDictionary<int, PageText> _ocrText = new();
     private readonly Dictionary<int, IReadOnlyList<PdfLink>> _links = new();
@@ -27,7 +28,8 @@ public sealed class DocumentSession : IAsyncDisposable
     private readonly OcrCache? _ocrCache;
     private int[] _generations;
 
-    private DocumentSession(IPdfDocument document, string displayName, string? password, string? documentKey, IOcrEngine ocr, Func<string?> ocrLanguage)
+    private DocumentSession(IPdfDocument document, string displayName, string? password, string? documentKey,
+        IOcrEngine ocr, Func<string?> ocrLanguage, Func<OcrOptions> ocrOptions)
     {
         Document = document;
         DisplayName = displayName;
@@ -35,6 +37,7 @@ public sealed class DocumentSession : IAsyncDisposable
         DocumentKey = documentKey;
         _ocr = ocr;
         _ocrLanguage = ocrLanguage;
+        _ocrOptions = ocrOptions;
         _generations = new int[document.PageCount];
         if (documentKey is not null) _ocrCache = new OcrCache(AppPaths.OcrDirectory, documentKey);
     }
@@ -77,7 +80,8 @@ public sealed class DocumentSession : IAsyncDisposable
     /// <summary>The underlying document object was replaced (after save).</summary>
     public event Action? DocumentReplaced;
 
-    public static async Task<DocumentSession> OpenAsync(string path, string? password, IOcrEngine ocr, Func<string?> ocrLanguage)
+    public static async Task<DocumentSession> OpenAsync(string path, string? password, IOcrEngine ocr,
+        Func<string?> ocrLanguage, Func<OcrOptions> ocrOptions)
     {
         IPdfDocument document = ImageDocument.IsImagePath(path)
             ? await ImageDocument.OpenAsync(path)
@@ -86,7 +90,7 @@ public sealed class DocumentSession : IAsyncDisposable
         {
             string? id = await document.GetFileIdentifierAsync();
             string key = await Task.Run(() => Core.Storage.DocumentKey.Compute(path, id, document.PageCount));
-            return new DocumentSession(document, Path.GetFileName(path), password, key, ocr, ocrLanguage);
+            return new DocumentSession(document, Path.GetFileName(path), password, key, ocr, ocrLanguage, ocrOptions);
         }
         catch
         {
@@ -95,8 +99,9 @@ public sealed class DocumentSession : IAsyncDisposable
         }
     }
 
-    public static DocumentSession FromImage(ImageDocument document, string displayName, IOcrEngine ocr, Func<string?> ocrLanguage) =>
-        new(document, displayName, null, null, ocr, ocrLanguage) { IsVirtual = true };
+    public static DocumentSession FromImage(ImageDocument document, string displayName, IOcrEngine ocr,
+        Func<string?> ocrLanguage, Func<OcrOptions> ocrOptions) =>
+        new(document, displayName, null, null, ocr, ocrLanguage, ocrOptions) { IsVirtual = true };
 
     public int GetGeneration(int pageIndex) => _generations[pageIndex];
 
@@ -138,12 +143,14 @@ public sealed class DocumentSession : IAsyncDisposable
     public async Task<PageText> RecognizePageAsync(int pageIndex, int priority, CancellationToken ct)
     {
         var size = PageSizes[pageIndex];
-        const double dpi = 300;
+        // Scans in the wild are 200-300 dpi; rendering above that gives the recognizer whole pixels to work
+        // with for small type (exponents, fraction digits) without inventing detail.
+        const double dpi = 400;
         int w = (int)Math.Round(size.Width * dpi / 72), h = (int)Math.Round(size.Height * dpi / 72);
-        (w, h) = ViewMath.ClampToMax(w, h, Math.Min(4200, _ocr.MaxImageDimension));
+        (w, h) = ViewMath.ClampToMax(w, h, Math.Min(5200, _ocr.MaxImageDimension));
 
         var bitmap = await Document.RenderAsync(pageIndex, w, h, 0, null, RenderFlags.None, priority, ct).ConfigureAwait(false);
-        var result = await _ocr.RecognizeAsync(bitmap, _ocrLanguage(), ct).ConfigureAwait(false);
+        var result = await _ocr.RecognizeAsync(bitmap, _ocrLanguage(), _ocrOptions(), ct).ConfigureAwait(false);
         var text = PageText.FromOcr(pageIndex, result);
         _ocrText[pageIndex] = text;
         try
@@ -162,8 +169,10 @@ public sealed class DocumentSession : IAsyncDisposable
     /// <summary>Recognizes text inside a normalized region, rendered at high resolution for accuracy.</summary>
     public async Task<OcrPageResult> RecognizeRegionAsync(int pageIndex, RectD region, CancellationToken ct = default)
     {
-        var bitmap = await RenderRegionAsync(pageIndex, region, minDpi: 300, minWidthPixels: 1400, ct);
-        return await _ocr.RecognizeAsync(bitmap, _ocrLanguage(), ct);
+        var bitmap = await RenderRegionAsync(pageIndex, region, minDpi: 400, minWidthPixels: 1400, ct);
+        // A selected region is rarely a whole page: columns and figure blocks do not apply to it.
+        var options = _ocrOptions() with { DetectFigures = false, RebuildReadingOrder = false };
+        return await _ocr.RecognizeAsync(bitmap, _ocrLanguage(), options, ct);
     }
 
     public Task<RenderedBitmap> RenderRegionAsync(int pageIndex, RectD region, double minDpi, int minWidthPixels, CancellationToken ct = default)
