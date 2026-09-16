@@ -6,8 +6,9 @@
 - Built a validation-only package successfully with Microsoft MakeAppx 10.0.28000.2705;
   staged application self-test passed. Test identity is explicitly labelled and kept outside `dist/`.
 - Solution build passed with 0 errors and 0 warnings; all 79 automated tests and Debug self-test passed.
-- Still required: MSIX listing identity from Partner Center, final package build, and installed-package
-  checks for launch, PDF activation, OCR and save. No Store-ready package or certification claim yet.
+- Built `dist/LitePDF-1.0.0.0-x64.msix` using the supplied identity for Store listing `9MXVJV3SMMKB`.
+  MakeAppx validation and staged self-test passed; checked final archive identity, runtime payload and checksum.
+- Still required: installed-package checks for launch, PDF activation, OCR and save, then Store certification.
 
 ## GitHub release preparation (2026-09-16, v1.0.0)
 - Release assets: self-contained Windows x64 installer and portable ZIP, with SHA-256 checksums.
