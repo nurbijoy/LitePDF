@@ -3,6 +3,14 @@
 A fast, private reader for PDFs and scanned images on Windows. Everything, including text recognition, runs on
 your PC; nothing is uploaded.
 
+## Download
+Get the latest build from [GitHub Releases](https://github.com/nurbijoy/LitePDF/releases/latest).
+- **Installer:** `LitePDF-1.0.0-setup.exe`
+- **Portable:** extract `LitePDF-1.0.0-win-x64-portable.zip` and run `LitePDF.exe`.
+
+Requires Windows 10 (19041) or later, x64. Both downloads include the .NET runtime.
+The app is not code-signed, so Windows SmartScreen may warn on first run.
+
 ## Features
 - **Reading:**
   - Smooth continuous scrolling, sharp at any zoom, fit width / fit page, two-page view, rotate
@@ -42,9 +50,11 @@ Requires the .NET 10 SDK on Windows 10 (19041) or later.
 dotnet build LitePDF.slnx
 dotnet test tests/LitePdf.Core.Tests
 dotnet run --project src/LitePdf.App
-powershell -File publish.ps1
+powershell -ExecutionPolicy Bypass -File publish.ps1
 ```
-The last command produces a portable build in `publish\` and `LitePDF-win-x64.zip`. It needs the .NET 10 Desktop Runtime.
+The last command produces a self-contained portable build in `publish\`, plus a portable ZIP and an installer
+in `dist\`. Building the installer requires Inno Setup 6. Use `-NoInstaller` for the portable ZIP only,
+or `-FrameworkDependent` for a smaller build that requires the .NET 10 Desktop Runtime on the target PC.
 
 Text recognition uses the Windows OCR languages installed on the PC. To add one: **Settings › Time & language ›
 Language & region**, add the language and include *Optical character recognition*.

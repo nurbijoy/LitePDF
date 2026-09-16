@@ -1,5 +1,13 @@
 # TASKS
 
+## GitHub release preparation (2026-09-16, v1.0.0)
+- Release assets: self-contained Windows x64 installer and portable ZIP, with SHA-256 checksums.
+- README now links to GitHub Releases and describes the current packaging and runtime requirements.
+- Release verification: solution build passed with 0 warnings and 0 errors; all 79 tests passed;
+  Debug application self-test passed. `publish.ps1` also runs the published application self-test before packaging.
+- Existing UI verification and known limits are recorded below; the release does not change application code.
+- Repository visibility remains private, so release downloads require repository access.
+
 ## Status (2026-09-16, OCR layout analysis)
 `Windows.Media.Ocr` on its own reads a scanned exam paper badly: stacked fractions come back as a stray dash,
 exponents and degree signs as ordinary digits, diagrams as garbled labels, and the lines in no useful order.
