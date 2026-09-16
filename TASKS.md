@@ -23,6 +23,14 @@ A layout pass now sits either side of the recognizer and rebuilds the page from 
 - [x] No false scripts on a page of running prose (`MAY 2018` page 1)
 - [x] Settings toggle off restores the plain recognizer output
 
+### Packaging
+- [x] App icon, assembly metadata (product, publisher, version)
+- [x] `LitePDF-1.0.0-setup.exe` (55 MB): per-user install without a UAC prompt, Start menu and optional desktop
+      shortcut, LitePDF offered under "Open with" for PDFs, entry in Settings > Apps
+- [x] Installed, launched, opened a PDF, then uninstalled: every file, shortcut and registry key removed,
+      and the uninstaller asks before deleting settings and the OCR cache
+- [ ] Not code-signed, so SmartScreen warns on first run (More info > Run anyway). See T-D2.
+
 ### Known limits
 - Ink the pen destroyed is gone: a question number or fraction bar scribbled over cannot be recovered.
 - π and ∠ are only repaired where the recognizer's spelling cannot occur in a word (`Tt`/`1t` → π,
@@ -82,4 +90,5 @@ Core, PDFium wrapper, OCR and the WPF app were rewritten. The previous implement
 7. **T-F5** Radicals and nested fractions: `MathLayout` finds one bar at a time and has no notion of a root sign.
 8. **T-F4** Form filling (`FPDFDOC_InitFormFillEnvironment`), ink/freehand annotations.
 9. **T-A1** Accessibility pass with Narrator: page text exposure via UI Automation for the viewer, focus order, high contrast theme.
-10. **T-D1** Installer (MSIX or Inno Setup), file association ("Open with"), app icon.
+10. **T-D2** Code-sign the installer so SmartScreen stops warning on first run (needs a certificate);
+    consider an MSIX/Store package and a winget manifest.

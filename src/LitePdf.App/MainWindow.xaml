@@ -6,6 +6,7 @@
         xmlns:views="clr-namespace:LitePdf.App.Views"
         Style="{StaticResource AppWindow}"
         Title="{Binding WindowTitle}"
+        Icon="Assets/LitePDF.ico"
         Width="1280" Height="860" MinWidth="760" MinHeight="480"
         AllowDrop="True">
 

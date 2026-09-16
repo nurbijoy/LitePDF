@@ -97,6 +97,23 @@ Order of work in `WindowsOcrEngine.RecognizeAsync`:
 - **A figure is settled after the text is read.** Before it, a circled question number and a ruled table both
   look exactly like a drawing.
 
+## 5b. Distribution
+- **`publish.ps1`** publishes, runs `--self-test` against the published build, writes a portable zip, then
+  builds the installer with Inno Setup. Everything lands in `dist/`.
+- **Self-contained by default** (194 MB on disk, 55 MB installer). Framework-dependent is 33 MB but needs the
+  .NET 10 Desktop Runtime, which few PCs have yet; `-FrameworkDependent` selects it.
+- **`installer/LitePDF.iss`** installs per-user under `%LocalAppData%\Programs\LitePDF` with no UAC prompt
+  (`PrivilegesRequired=lowest`), or for all users when run as admin.
+  - Start menu shortcut always; desktop shortcut and PDF association are opt-out tasks.
+  - PDF association registers LitePDF as a *candidate*: `Applications\LitePDF.exe`, a `LitePDF.Document`
+    ProgID, `.pdf\OpenWithProgIds` and `RegisteredApplications`. Windows 10/11 do not let an installer take
+    the default over, and this does not try to — the user picks it from "Open with" or Settings > Default apps.
+  - Uninstalling asks before removing `%LocalAppData%\LitePDF` (settings, reading positions, OCR cache), and
+    a silent uninstall always keeps it.
+  - `AppId` is a fixed GUID: it is how Windows recognizes an upgrade rather than a second copy.
+- **Not signed.** SmartScreen will warn on first run until the download builds reputation or the exe is signed
+  with an EV certificate.
+
 ## 6. App (`LitePdf.App`)
 ```
 App.xaml(.cs)            startup, global error handling, --self-test
