@@ -98,6 +98,10 @@ Order of work in `WindowsOcrEngine.RecognizeAsync`:
   look exactly like a drawing.
 
 ## 5b. Distribution
+- **`publish-msix.ps1`** additionally builds an unsigned, self-contained x64 MSIX for Microsoft Store upload.
+  It requires the exact Store identity, publishes to a fresh staging directory, runs the app self-test, and
+  packages with Windows SDK MakeAppx validation. The manifest declares the full-trust app and PDF association.
+  The display name comes from `Product`; Microsoft supplies Store signing and hosting. See `docs/MSIX.md`.
 - **`publish.ps1`** publishes, runs `--self-test` against the published build, writes a portable zip, then
   builds the installer with Inno Setup. Everything lands in `dist/`. Run it with `-ExecutionPolicy Bypass`:
   Windows refuses unsigned local scripts by default. It deletes each artifact before writing it and checks the

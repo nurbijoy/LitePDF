@@ -1,5 +1,14 @@
 # TASKS
 
+## MSIX packaging preparation (2026-09-16)
+- Added `publish-msix.ps1` and `docs/MSIX.md`: fresh self-contained x64 publish, self-test,
+  Store identity parameters, package artwork, PDF association, MakeAppx validation and SHA-256 output.
+- Built a validation-only package successfully with Microsoft MakeAppx 10.0.28000.2705;
+  staged application self-test passed. Test identity is explicitly labelled and kept outside `dist/`.
+- Solution build passed with 0 errors and 0 warnings; all 79 automated tests and Debug self-test passed.
+- Still required: MSIX listing identity from Partner Center, final package build, and installed-package
+  checks for launch, PDF activation, OCR and save. No Store-ready package or certification claim yet.
+
 ## GitHub release preparation (2026-09-16, v1.0.0)
 - Release assets: self-contained Windows x64 installer and portable ZIP, with SHA-256 checksums.
 - README now links to GitHub Releases and describes the current packaging and runtime requirements.

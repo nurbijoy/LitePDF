@@ -59,4 +59,9 @@ or `-FrameworkDependent` for a smaller build that requires the .NET 10 Desktop R
 Text recognition uses the Windows OCR languages installed on the PC. To add one: **Settings › Time & language ›
 Language & region**, add the language and include *Optical character recognition*.
 
+## Microsoft Store (MSIX)
+`publish-msix.ps1` builds an unsigned, self-contained x64 package for a matching MSIX listing in Partner Center.
+It requires the Windows SDK's `MakeAppx.exe` and the exact Store package identity. See
+[MSIX packaging](docs/MSIX.md) for the command and submission steps.
+
 See `AGENTS.md` for contributor guidance and `docs/BLUEPRINT.md` for the architecture.
