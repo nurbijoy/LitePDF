@@ -1,11 +1,12 @@
 using System.Windows;
 using LitePdf.App.Infrastructure;
 using LitePdf.Core.Storage;
-
 namespace LitePdf.App;
 
 public partial class App : Application
 {
+    private SingleInstance? _singleInstance;
+
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -29,13 +30,47 @@ public partial class App : Application
             return;
         }
 
+        string? file = e.Args.FirstOrDefault(a => !a.StartsWith('-') && !a.StartsWith('/'));
+
+        _singleInstance = SingleInstance.TryCreate();
+        if (!_singleInstance.IsFirstInstance)
+        {
+            if (SingleInstance.SendToExistingInstance(file))
+            {
+                Shutdown(0);
+                return;
+            }
+            _singleInstance.Dispose();
+            _singleInstance = SingleInstance.TryCreate();
+        }
+
+        _singleInstance.StartServer(receivedPath =>
+        {
+            Dispatcher.BeginInvoke(async () =>
+            {
+                if (MainWindow is MainWindow window)
+                {
+                    window.BringToFront();
+                    if (!string.IsNullOrWhiteSpace(receivedPath))
+                    {
+                        await window.OpenDocumentAsync(receivedPath);
+                    }
+                }
+            });
+        });
+
         var settings = AppSettings.Load();
         ThemeManager.Initialize(settings.Theme);
 
-        string? file = e.Args.FirstOrDefault(a => !a.StartsWith('-') && !a.StartsWith('/'));
         var window = new MainWindow(settings, file);
         MainWindow = window;
         window.Show();
+    }
+
+    protected override void OnExit(ExitEventArgs e)
+    {
+        _singleInstance?.Dispose();
+        base.OnExit(e);
     }
 
     /// <summary>

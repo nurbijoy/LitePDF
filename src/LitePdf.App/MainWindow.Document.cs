@@ -31,8 +31,10 @@ public partial class MainWindow
     public async Task OpenDocumentAsync(string path)
     {
         path = Path.GetFullPath(path);
-        if (_session is { IsVirtual: false } current && string.Equals(current.FilePath, path, StringComparison.OrdinalIgnoreCase))
+        var existing = _vm.Tabs.FirstOrDefault(t => !t.IsVirtual && string.Equals(t.FilePath, path, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
         {
+            SelectTab(existing);
             Viewer.Focus();
             return;
         }
@@ -44,7 +46,6 @@ public partial class MainWindow
             LoadRecentList();
             return;
         }
-        if (!await ConfirmDiscardChangesAsync()) return;
 
         DocumentSession session;
         string? password = null;
@@ -76,7 +77,10 @@ public partial class MainWindow
             }
         }
 
-        await AttachSessionAsync(session, path);
+        var tab = new DocumentTab(session);
+        _vm.Tabs.Add(tab);
+        SelectTab(tab, recentPath: path);
+        await LoadOutlineAsync(session);
     }
 
     private static string DescribeOpenError(Exception ex) => ex switch
@@ -88,74 +92,236 @@ public partial class MainWindow
         _ => ex.Message,
     };
 
-    private async Task AttachSessionAsync(DocumentSession session, string? recentPath)
+    public void SelectTab(DocumentTab tab, string? recentPath = null)
     {
-        await CloseSessionAsync();
-        _session = session;
-        session.DirtyChanged += OnSessionDirtyChanged;
-        session.PageInvalidated += OnSessionPageInvalidated;
-        session.PageTextChanged += OnSessionPageTextChanged;
-        session.AnnotationsChanged += OnSessionAnnotationsChanged;
-        session.DocumentReplaced += OnSessionDocumentReplaced;
+        if (ReferenceEquals(_activeTab, tab)) return;
 
-        ViewState? state = null;
-        if (recentPath is not null && _settings.RestoreLastPosition && _recent.Find(recentPath) is { } entry && entry.PageIndex < session.PageCount)
-            state = new ViewState(entry.PageIndex, entry.PageOffset ?? 0, entry.Zoom, entry.ZoomMode, entry.Rotation, entry.LayoutMode);
+        if (_activeTab is not null)
+        {
+            SaveActiveTabState();
+            _activeTab.IsActive = false;
+            if (_session is not null)
+            {
+                _session.DirtyChanged -= OnSessionDirtyChanged;
+                _session.PageInvalidated -= OnSessionPageInvalidated;
+                _session.PageTextChanged -= OnSessionPageTextChanged;
+                _session.AnnotationsChanged -= OnSessionAnnotationsChanged;
+                _session.DocumentReplaced -= OnSessionDocumentReplaced;
+            }
+            _ocrCts?.Cancel();
+            _speech?.Stop();
+            _vm.IsReadingAloud = false;
+        }
 
-        _bannerDismissed = false;
+        _activeTab = tab;
+        _session = tab.Session;
+        _vm.ActiveTab = tab;
+        tab.IsActive = true;
+
+        tab.Session.DirtyChanged += OnSessionDirtyChanged;
+        tab.Session.PageInvalidated += OnSessionPageInvalidated;
+        tab.Session.PageTextChanged += OnSessionPageTextChanged;
+        tab.Session.AnnotationsChanged += OnSessionAnnotationsChanged;
+        tab.Session.DocumentReplaced += OnSessionDocumentReplaced;
+
+        if (tab.ViewState is null && recentPath is not null && _settings.RestoreLastPosition && _recent.Find(recentPath) is { } entry && entry.PageIndex < tab.Session.PageCount)
+            tab.ViewState = new ViewState(entry.PageIndex, entry.PageOffset ?? 0, entry.Zoom, entry.ZoomMode, entry.Rotation, entry.LayoutMode);
+
+        _bannerDismissed = tab.BannerDismissed;
         _vm.HasDocument = true;
-        _vm.FileName = session.DisplayName;
-        _vm.PageCount = session.PageCount;
-        _vm.CurrentPageNumber = (state?.PageIndex ?? 0) + 1;
-        _vm.IsDirty = false;
-        _vm.CanSave = false;
-        _vm.CanAnnotate = session.CanAnnotate;
+        _vm.FileName = tab.Title;
+        _vm.PageCount = tab.Session.PageCount;
+        _vm.CurrentPageNumber = (tab.ViewState?.PageIndex ?? 0) + 1;
+        _vm.IsDirty = tab.IsDirty;
+        _vm.CanSave = tab.IsDirty && tab.IsPdf;
+        _vm.CanAnnotate = tab.CanAnnotate;
         _vm.Tool = ViewerTool.Select;
         _vm.StatusText = "";
+        _vm.SelectedPanel = tab.SelectedPanel;
+        _vm.IsSidebarOpen = tab.IsSidebarOpen;
         UpdateSidebarVisibility();
 
-        Viewer.Open(session, state, _settings.DefaultZoomMode);
-        BuildThumbnails();
-        ClearSearch();
+        Viewer.Open(tab.Session, tab.ViewState, _settings.DefaultZoomMode);
+
+        if (tab.Thumbnails.Count == tab.Session.PageCount && tab.ThumbnailRotation == Viewer.Rotation)
+        {
+            _vm.Thumbnails = tab.Thumbnails;
+            _thumbnailRotation = tab.ThumbnailRotation;
+            SyncThumbnailSelection(Viewer.CurrentPageIndex);
+        }
+        else
+        {
+            BuildThumbnails();
+        }
+
+        _vm.SearchQuery = tab.SearchQuery;
+        _vm.MatchCase = tab.MatchCase;
+        _vm.WholeWord = tab.WholeWord;
+        _vm.SearchResults.Clear();
+        foreach (var item in tab.SearchResults) _vm.SearchResults.Add(item);
+        _vm.SearchStatus = tab.SearchStatus;
+        _completedSearchKey = tab.CompletedSearchKey;
+        _currentHitIndex = tab.CurrentHitIndex;
+        Viewer.SetSearchHits(tab.SearchHits);
+
+        _vm.Outline = tab.Outline;
+        _outlineFlat = tab.OutlineFlat;
+        _currentChapter = tab.CurrentChapter;
+        UpdateCurrentChapter(Viewer.CurrentPageIndex);
+
         _vm.Annotations.Clear();
-        _annotationsStale = true;
-        if (_vm.SelectedPanel == SidebarPanel.Annotations && _vm.IsSidebarOpen) RefreshAnnotations();
+        foreach (var a in tab.Annotations) _vm.Annotations.Add(a);
+        _vm.AnnotationsStatus = tab.AnnotationsStatus;
+        _annotationsStale = tab.AnnotationsStale;
+        if (_vm.SelectedPanel == SidebarPanel.Annotations && _vm.IsSidebarOpen && _annotationsStale) RefreshAnnotations();
 
         if (recentPath is not null)
         {
-            _recent.Upsert(new RecentFile { Path = recentPath, LastOpened = DateTimeOffset.Now, PageIndex = state?.PageIndex ?? 0, Zoom = state?.Zoom ?? 1, ZoomMode = state?.ZoomMode ?? _settings.DefaultZoomMode });
+            _recent.Upsert(new RecentFile { Path = recentPath, LastOpened = DateTimeOffset.Now, PageIndex = tab.ViewState?.PageIndex ?? 0, Zoom = tab.ViewState?.Zoom ?? 1, ZoomMode = tab.ViewState?.ZoomMode ?? _settings.DefaultZoomMode });
             SaveRecent();
             LoadRecentList();
         }
 
         Viewer.Focus();
-        await LoadOutlineAsync(session);
+    }
+
+    private void SaveActiveTabState()
+    {
+        if (_activeTab is null) return;
+        _activeTab.ViewState = Viewer.GetViewState();
+        _activeTab.Thumbnails = _vm.Thumbnails;
+        _activeTab.ThumbnailRotation = _thumbnailRotation;
+        _activeTab.Outline = _vm.Outline;
+        _activeTab.OutlineFlat = _outlineFlat;
+        _activeTab.CurrentChapter = _currentChapter;
+        _activeTab.SearchQuery = _vm.SearchQuery;
+        _activeTab.MatchCase = _vm.MatchCase;
+        _activeTab.WholeWord = _vm.WholeWord;
+        _activeTab.SearchResults = _vm.SearchResults.ToList();
+        _activeTab.SearchStatus = _vm.SearchStatus;
+        _activeTab.CompletedSearchKey = _completedSearchKey;
+        _activeTab.CurrentHitIndex = _currentHitIndex;
+        _activeTab.SearchHits = Viewer.SearchHits;
+        _activeTab.Annotations = _vm.Annotations.ToList();
+        _activeTab.AnnotationsStatus = _vm.AnnotationsStatus;
+        _activeTab.AnnotationsStale = _annotationsStale;
+        _activeTab.SelectedPanel = _vm.SelectedPanel;
+        _activeTab.IsSidebarOpen = _vm.IsSidebarOpen;
+        _activeTab.BannerDismissed = _bannerDismissed;
+    }
+
+    public async Task<bool> CloseTabAsync(DocumentTab? tab)
+    {
+        if (tab is null) return true;
+        if (tab.IsDirty)
+        {
+            if (!ReferenceEquals(_activeTab, tab)) SelectTab(tab);
+            var result = MessageDialog.Show(this, "Save your changes?",
+                $"“{tab.Title}” has annotations that haven't been saved.", MessageDialogButtons.SaveDiscardCancel);
+            if (result == MessageDialogResult.Cancel) return false;
+            if (result == MessageDialogResult.Save)
+            {
+                if (!await SaveTabAsync(tab, saveAs: false)) return false;
+            }
+        }
+
+        SaveReadingPosition(tab);
+
+        int index = _vm.Tabs.IndexOf(tab);
+        bool wasActive = ReferenceEquals(_activeTab, tab);
+
+        _vm.Tabs.Remove(tab);
+
+        try
+        {
+            await tab.Session.DisposeAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Disposing closed tab");
+        }
+
+        if (wasActive)
+        {
+            if (_vm.Tabs.Count > 0)
+            {
+                int nextIndex = Math.Clamp(index, 0, _vm.Tabs.Count - 1);
+                SelectTab(_vm.Tabs[nextIndex]);
+            }
+            else
+            {
+                await CloseSessionAsync();
+            }
+        }
+
+        return true;
+    }
+
+    public async Task CloseOtherTabsAsync(DocumentTab keepTab)
+    {
+        var others = _vm.Tabs.Where(t => !ReferenceEquals(t, keepTab)).ToList();
+        foreach (var tab in others)
+        {
+            if (!await CloseTabAsync(tab)) break;
+        }
+    }
+
+    public async Task<bool> CloseAllTabsWithPromptAsync()
+    {
+        if (_vm.Tabs.Count == 0) return true;
+        if (_vm.Tabs.Count > 1)
+        {
+            var result = MessageDialog.Show(this, "Close all tabs?",
+                $"You have {_vm.Tabs.Count} open tabs. Do you want to close all tabs?",
+                MessageDialogButtons.OkCancel, okText: "Close all tabs");
+            if (result != MessageDialogResult.Ok) return false;
+        }
+
+        foreach (var tab in _vm.Tabs.ToList())
+        {
+            if (!await CloseTabAsync(tab)) return false;
+        }
+        return true;
+    }
+
+    public void SwitchTab(int direction)
+    {
+        if (_vm.Tabs.Count <= 1 || _activeTab is null) return;
+        int currentIndex = _vm.Tabs.IndexOf(_activeTab);
+        if (currentIndex < 0) return;
+        int nextIndex = (currentIndex + direction + _vm.Tabs.Count) % _vm.Tabs.Count;
+        SelectTab(_vm.Tabs[nextIndex]);
     }
 
     private async Task CloseDocumentAsync()
     {
-        if (!await ConfirmDiscardChangesAsync()) return;
-        await CloseSessionAsync();
+        if (_activeTab is not null)
+            await CloseTabAsync(_activeTab);
+        else
+            await CloseSessionAsync();
     }
 
     private async Task CloseSessionAsync()
     {
         var session = _session;
-        if (session is null) return;
-
-        SaveReadingPosition();
+        SaveActiveTabState();
         _ocrCts?.Cancel();
         _searchCts?.Cancel();
         _annotationsCts?.Cancel();
         _speech?.Stop();
         _vm.IsReadingAloud = false;
 
-        session.DirtyChanged -= OnSessionDirtyChanged;
-        session.PageInvalidated -= OnSessionPageInvalidated;
-        session.PageTextChanged -= OnSessionPageTextChanged;
-        session.AnnotationsChanged -= OnSessionAnnotationsChanged;
-        session.DocumentReplaced -= OnSessionDocumentReplaced;
+        if (session is not null)
+        {
+            session.DirtyChanged -= OnSessionDirtyChanged;
+            session.PageInvalidated -= OnSessionPageInvalidated;
+            session.PageTextChanged -= OnSessionPageTextChanged;
+            session.AnnotationsChanged -= OnSessionAnnotationsChanged;
+            session.DocumentReplaced -= OnSessionDocumentReplaced;
+        }
         _session = null;
+        _activeTab = null;
+        _vm.ActiveTab = null;
 
         Viewer.Close();
         foreach (var item in _vm.Thumbnails) item.Pending?.Cancel();
@@ -174,22 +340,27 @@ public partial class MainWindow
         UpdateSidebarVisibility();
         LoadRecentList();
 
-        try
+        if (session is not null)
         {
-            await session.DisposeAsync();
-        }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "Closing document");
+            try
+            {
+                await session.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Closing document");
+            }
         }
     }
 
-    private void SaveReadingPosition()
+    private void SaveReadingPosition(DocumentTab? tab)
     {
-        if (_session is not { IsVirtual: false } session || Viewer.GetViewState() is not { } state) return;
+        if (tab is null || tab.IsVirtual) return;
+        var state = ReferenceEquals(_activeTab, tab) ? Viewer.GetViewState() : tab.ViewState;
+        if (state is null) return;
         _recent.Upsert(new RecentFile
         {
-            Path = session.FilePath,
+            Path = tab.FilePath,
             LastOpened = DateTimeOffset.Now,
             PageIndex = state.PageIndex,
             PageOffset = state.PageOffset,
@@ -200,6 +371,8 @@ public partial class MainWindow
         });
         SaveRecent();
     }
+
+    private void SaveReadingPosition() => SaveReadingPosition(_activeTab);
 
     private void SaveRecent()
     {
@@ -266,14 +439,17 @@ public partial class MainWindow
             return;
         }
         var document = ImageDocument.FromBitmap(image, "Pasted image");
-        await AttachSessionAsync(DocumentSession.FromImage(document, "Pasted image", _ocr, () => _settings.OcrLanguage, () => _settings.OcrOptions()), null);
+        var session = DocumentSession.FromImage(document, "Pasted image", _ocr, () => _settings.OcrLanguage, () => _settings.OcrOptions());
+        var tab = new DocumentTab(session);
+        _vm.Tabs.Add(tab);
+        SelectTab(tab, recentPath: null);
     }
 
     private async Task<bool> ConfirmDiscardChangesAsync()
     {
-        if (_session is not { IsDirty: true } session) return true;
+        if (_activeTab is not { IsDirty: true } tab) return true;
         var result = MessageDialog.Show(this, "Save your changes?",
-            $"“{session.DisplayName}” has annotations that haven't been saved.", MessageDialogButtons.SaveDiscardCancel);
+            $"“{tab.Title}” has annotations that haven't been saved.", MessageDialogButtons.SaveDiscardCancel);
         return result switch
         {
             MessageDialogResult.Save => await SaveAsync(saveAs: false),
@@ -282,19 +458,19 @@ public partial class MainWindow
         };
     }
 
-    private async Task<bool> SaveAsync(bool saveAs)
+    private async Task<bool> SaveTabAsync(DocumentTab tab, bool saveAs)
     {
-        if (_session is not { IsPdf: true } session) return false;
-        if (!saveAs && !session.IsDirty) return true;
+        if (!tab.IsPdf) return false;
+        if (!saveAs && !tab.IsDirty) return true;
 
         string? target = null;
-        if (saveAs || session.IsVirtual)
+        if (saveAs || tab.IsVirtual)
         {
             var dialog = new SaveFileDialog
             {
                 Filter = "PDF document (*.pdf)|*.pdf",
-                FileName = Path.GetFileName(session.FilePath),
-                InitialDirectory = Path.GetDirectoryName(session.FilePath),
+                FileName = Path.GetFileName(tab.FilePath),
+                InitialDirectory = Path.GetDirectoryName(tab.FilePath),
                 DefaultExt = ".pdf",
                 AddExtension = true,
                 Title = "Save as",
@@ -307,11 +483,18 @@ public partial class MainWindow
         _vm.IsBusy = true;
         try
         {
-            await session.SaveAsync(target);
-            _vm.FileName = session.DisplayName;
+            await tab.Session.SaveAsync(target);
+            tab.Title = tab.Session.DisplayName;
+            tab.IsDirty = tab.Session.IsDirty;
+            if (ReferenceEquals(_activeTab, tab))
+            {
+                _vm.FileName = tab.Title;
+                _vm.IsDirty = tab.IsDirty;
+                _vm.CanSave = tab.IsDirty && tab.IsPdf;
+            }
             if (target is not null)
             {
-                _recent.Upsert(new RecentFile { Path = session.FilePath, LastOpened = DateTimeOffset.Now });
+                _recent.Upsert(new RecentFile { Path = tab.Session.FilePath, LastOpened = DateTimeOffset.Now });
                 SaveRecent();
             }
             ShowToast("Saved");
@@ -329,6 +512,9 @@ public partial class MainWindow
             _vm.IsBusy = false;
         }
     }
+
+    private Task<bool> SaveAsync(bool saveAs) =>
+        _activeTab is not null ? SaveTabAsync(_activeTab, saveAs) : Task.FromResult(false);
 
     private async Task PrintAsync()
     {
@@ -413,6 +599,10 @@ public partial class MainWindow
         if (_session is not { } session) return;
         _vm.IsDirty = session.IsDirty;
         _vm.CanSave = session.IsDirty && session.IsPdf;
+        if (_activeTab is not null)
+        {
+            _activeTab.IsDirty = session.IsDirty;
+        }
     }
 
     private void OnSessionPageInvalidated(int page) => RefreshThumbnail(page);
@@ -425,6 +615,7 @@ public partial class MainWindow
 
     private void OnSessionDocumentReplaced()
     {
+        if (_activeTab is not null) _activeTab.Title = _session?.DisplayName ?? "";
         _vm.FileName = _session?.DisplayName ?? "";
         RefreshAllThumbnails();
         _annotationsStale = true;

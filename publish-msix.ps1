@@ -21,6 +21,10 @@ if (-not $MakeAppxPath) {
     $sdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
     $MakeAppxPath = Get-ChildItem "$sdkBin\*\x64\makeappx.exe" -ErrorAction SilentlyContinue |
         Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+    if (-not $MakeAppxPath) {
+        $MakeAppxPath = Get-ChildItem (Join-Path $root 'artifacts\msix-tools\sdk\bin\*\x64\makeappx.exe') -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+    }
 }
 if (-not $MakeAppxPath -or -not (Test-Path -LiteralPath $MakeAppxPath)) {
     throw 'Install the Windows SDK or pass -MakeAppxPath pointing to its x64 MakeAppx.exe.'

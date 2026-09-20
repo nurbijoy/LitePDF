@@ -160,6 +160,40 @@
         </Setter>
     </Style>
 
+    <!-- Tab close button (compact 'x' icon) -->
+    <Style x:Key="TabCloseButton" TargetType="Button">
+        <Setter Property="Foreground" Value="{DynamicResource Brush.TextSecondary}"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Width" Value="20"/>
+        <Setter Property="Height" Value="20"/>
+        <Setter Property="Padding" Value="0"/>
+        <Setter Property="MinHeight" Value="20"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="FontFamily" Value="{StaticResource Font.Icons}"/>
+        <Setter Property="FontSize" Value="9"/>
+        <Setter Property="Content" Value="&#xE711;"/>
+        <Setter Property="ToolTip" Value="Close tab (Ctrl+W)"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="{StaticResource Radius.Control}" SnapsToDevicePixels="True">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Brush.Hover}"/>
+                            <Setter Property="Foreground" Value="{DynamicResource Brush.Text}"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Brush.Pressed}"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <!-- Navigation rail item (sidebar panel switcher) -->
     <Style x:Key="RailButton" TargetType="RadioButton">
         <Setter Property="Foreground" Value="{DynamicResource Brush.TextSecondary}"/>

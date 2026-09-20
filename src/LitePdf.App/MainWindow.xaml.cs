@@ -27,6 +27,7 @@ public partial class MainWindow : Window
     private readonly string? _startupFile;
     private readonly DispatcherTimer _toastTimer;
     private DocumentSession? _session;
+    private DocumentTab? _activeTab;
     private bool _allowClose;
     private WindowState _stateBeforeFullScreen;
 
@@ -149,15 +150,17 @@ public partial class MainWindow : Window
         {
             switch (key)
             {
+                case Key.T: Handle(() => Run(OpenFileDialogAsync)); return;
                 case Key.O: Handle(() => Run(OpenFileDialogAsync)); return;
                 case Key.S when hasDocument: Handle(() => Run(() => SaveAsync(saveAs: shift))); return;
                 case Key.P when hasDocument: Handle(() => Run(PrintAsync)); return;
-                case Key.W when hasDocument: Handle(() => Run(CloseDocumentAsync)); return;
+                case Key.W when hasDocument: Handle(() => Run(() => CloseTabAsync(_activeTab))); return;
                 case Key.F when hasDocument: Handle(ShowSearch); return;
                 case Key.G when hasDocument: Handle(() => { PageBox.Focus(); PageBox.SelectAll(); }); return;
                 case Key.B when hasDocument: Handle(() => _vm.IsSidebarOpen = !_vm.IsSidebarOpen); return;
                 case Key.D when hasDocument: Handle(() => Run(ShowPropertiesAsync)); return;
                 case Key.V when !inTextInput: Handle(() => Run(PasteImageAsync)); return;
+                case Key.Tab when _vm.Tabs.Count > 1: Handle(() => SwitchTab(shift ? -1 : 1)); return;
             }
 
             if (hasDocument && !inTextInput)
@@ -303,8 +306,10 @@ public partial class MainWindow : Window
             MenuItemFor("Document properties", Icons.Info, () => Run(ShowPropertiesAsync), "Ctrl+D", hasDocument),
             null,
             MenuItemFor("Settings", Icons.Settings, ShowSettings),
-            MenuItemFor("Close document", Icons.Close, () => Run(CloseDocumentAsync), "Ctrl+W", hasDocument),
+            MenuItemFor("Close tab", Icons.Close, () => Run(() => CloseTabAsync(_activeTab)), "Ctrl+W", hasDocument),
         };
+        if (_vm.Tabs.Count > 1)
+            items.Add(MenuItemFor("Close all tabs", null, () => Run(CloseAllTabsWithPromptAsync)));
         OpenMenu(items, MoreMenuButton);
     }
 
@@ -343,6 +348,7 @@ public partial class MainWindow : Window
     {
         _vm.IsFullScreen = !_vm.IsFullScreen;
         bool full = _vm.IsFullScreen;
+        TabRow.Height = full ? new GridLength(0) : GridLength.Auto;
         CommandRow.Height = full ? new GridLength(0) : GridLength.Auto;
         StatusRow.Height = full ? new GridLength(0) : GridLength.Auto;
         RailColumn.Width = full ? new GridLength(0) : GridLength.Auto;
@@ -422,8 +428,38 @@ public partial class MainWindow : Window
         e.Cancel = true;
         try
         {
-            if (!await ConfirmDiscardChangesAsync()) return;
+            if (_vm.Tabs.Count > 1)
+            {
+                var result = MessageDialog.Show(this, "Close all tabs?",
+                    $"You have {_vm.Tabs.Count} open tabs. Do you want to close all tabs?",
+                    MessageDialogButtons.OkCancel, okText: "Close all tabs");
+                if (result != MessageDialogResult.Ok) return;
+            }
+
+            foreach (var tab in _vm.Tabs.ToList())
+            {
+                if (tab.IsDirty)
+                {
+                    SelectTab(tab);
+                    var result = MessageDialog.Show(this, "Save your changes?",
+                        $"“{tab.Title}” has annotations that haven't been saved.",
+                        MessageDialogButtons.SaveDiscardCancel);
+                    if (result == MessageDialogResult.Cancel) return;
+                    if (result == MessageDialogResult.Save)
+                    {
+                        if (!await SaveTabAsync(tab, saveAs: false)) return;
+                    }
+                }
+            }
+
             SaveWindowSettings();
+
+            foreach (var tab in _vm.Tabs.ToList())
+            {
+                SaveReadingPosition(tab);
+                await tab.Session.DisposeAsync();
+            }
+            _vm.Tabs.Clear();
             await CloseSessionAsync();
         }
         catch (Exception ex)
@@ -570,4 +606,54 @@ public partial class MainWindow : Window
         }
         menu.IsOpen = true;
     }
+
+    public void BringToFront()
+    {
+        if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
+        Activate();
+        Focus();
+    }
+
+    private void TabItem_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is DependencyObject dep)
+        {
+            for (var el = dep; el is not null and not Border; el = VisualTreeHelper.GetParent(el))
+                if (el is Button) return; // clicked close button
+        }
+        if ((sender as FrameworkElement)?.DataContext is DocumentTab tab)
+            SelectTab(tab);
+    }
+
+    private void TabItem_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton == MouseButton.Middle && (sender as FrameworkElement)?.DataContext is DocumentTab tab)
+        {
+            e.Handled = true;
+            Run(() => CloseTabAsync(tab));
+        }
+    }
+
+    private void CloseTabButton_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if ((sender as FrameworkElement)?.DataContext is DocumentTab tab)
+            Run(() => CloseTabAsync(tab));
+    }
+
+    private void NewTab_Click(object sender, RoutedEventArgs e) => Run(OpenFileDialogAsync);
+
+    private void TabContextClose_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is DocumentTab tab)
+            Run(() => CloseTabAsync(tab));
+    }
+
+    private void TabContextCloseOthers_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is DocumentTab tab)
+            Run(() => CloseOtherTabsAsync(tab));
+    }
+
+    private void TabContextCloseAll_Click(object sender, RoutedEventArgs e) => Run(CloseAllTabsWithPromptAsync);
 }

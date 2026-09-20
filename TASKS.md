@@ -1,5 +1,15 @@
 # TASKS
 
+## Multi-tab document support and single-instance IPC (2026-09-20, T-F1)
+- **Single-instance process management:** Added `SingleInstance` using session-scoped mutex (`Local\LitePDF-SingleInstance-{User}`) and asynchronous named pipe IPC (`LitePDF-IPC-{User}`). When opening additional documents from Explorer or command line, arguments are sent to the running instance and the new process exits with code 0.
+- **Fluent tab strip:** Top-level tab row (`TabBar`) showing open document tabs with document icons, filename with truncation, dirty dot indicator (`●`), and compact close button (`×`). Includes `+` button to open a new tab.
+- **Tab management:**
+  - Individual tab close via `×` button, middle-click, context menu, or `Ctrl+W`. Prompts to save if modified.
+  - Tab switching (`Ctrl+Tab`, `Ctrl+Shift+Tab`, or click) preserves view state (page, offset, zoom, rotation, layout mode), thumbnails, outline, search queries, hits, and annotations.
+  - Context menu: Close tab, Close other tabs, Close all tabs.
+- **Close confirmation:** Closing the window with multiple tabs open prompts with a warning dialog (*"Close all tabs? You have {N} open tabs. Do you want to close all tabs?"*), checks all dirty tabs for unsaved changes, saves reading positions for all documents, and closes cleanly.
+- **Verification:** Solution build passed with 0 errors and 0 warnings; all 79 automated tests passed; Debug application self-test passed in both Light and Dark themes. Tested IPC and multi-tab opening with generated sample PDFs.
+
 ## MSIX packaging preparation (2026-09-16)
 - Added `publish-msix.ps1` and `docs/MSIX.md`: fresh self-contained x64 publish, self-test,
   Store identity parameters, package artwork, PDF association, MakeAppx validation and SHA-256 output.

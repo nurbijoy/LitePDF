@@ -31,13 +31,123 @@
 
     <Grid>
         <Grid.RowDefinitions>
+            <RowDefinition x:Name="TabRow" Height="Auto"/>
             <RowDefinition x:Name="CommandRow" Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition x:Name="StatusRow" Height="Auto"/>
         </Grid.RowDefinitions>
 
+        <!-- ===== Tab bar ===== -->
+        <Border x:Name="TabBar" Grid.Row="0" Background="{DynamicResource Brush.Window}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="0,0,0,1"
+                Visibility="{Binding HasTabs, Converter={StaticResource BoolToVisibility}}">
+            <Grid Height="36">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled" Focusable="False">
+                    <ItemsControl x:Name="TabList" ItemsSource="{Binding Tabs}">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal" VerticalAlignment="Bottom"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate DataType="vm:DocumentTab">
+                                <Border x:Name="TabBd" Height="32" Margin="4,2,0,0" Padding="8,0,6,0" CornerRadius="6,6,0,0"
+                                        BorderThickness="1,1,1,0" Cursor="Hand" ToolTip="{Binding FilePath}"
+                                        PreviewMouseLeftButtonDown="TabItem_PreviewMouseLeftButtonDown"
+                                        PreviewMouseDown="TabItem_PreviewMouseDown">
+                                    <Border.Style>
+                                        <Style TargetType="Border">
+                                            <Setter Property="Background" Value="Transparent"/>
+                                            <Setter Property="BorderBrush" Value="Transparent"/>
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                    <Setter Property="Background" Value="{DynamicResource Brush.Chrome}"/>
+                                                    <Setter Property="BorderBrush" Value="{DynamicResource Brush.Border}"/>
+                                                </DataTrigger>
+                                                <MultiDataTrigger>
+                                                    <MultiDataTrigger.Conditions>
+                                                        <Condition Binding="{Binding IsActive}" Value="False"/>
+                                                        <Condition Binding="{Binding RelativeSource={RelativeSource Self}, Path=IsMouseOver}" Value="True"/>
+                                                    </MultiDataTrigger.Conditions>
+                                                    <Setter Property="Background" Value="{DynamicResource Brush.Hover}"/>
+                                                </MultiDataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <Border.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Close tab" InputGestureText="Ctrl+W" Click="TabContextClose_Click"/>
+                                            <MenuItem Header="Close other tabs" Click="TabContextCloseOthers_Click"/>
+                                            <MenuItem Header="Close all tabs" Click="TabContextCloseAll_Click"/>
+                                        </ContextMenu>
+                                    </Border.ContextMenu>
+                                    <Grid VerticalAlignment="Center">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+
+                                        <!-- Document icon -->
+                                        <TextBlock Grid.Column="0" Text="&#xE8A5;" FontSize="13" VerticalAlignment="Center">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock" BasedOn="{StaticResource Icon}">
+                                                    <Setter Property="Foreground" Value="{DynamicResource Brush.TextSecondary}"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                            <Setter Property="Foreground" Value="{DynamicResource Brush.Accent}"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+
+                                        <!-- Unsaved dot indicator -->
+                                        <TextBlock Grid.Column="1" Text="●" FontSize="8" Margin="3,0,0,0" VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource Brush.Accent}"
+                                                   Visibility="{Binding IsDirty, Converter={StaticResource BoolToVisibility}}"/>
+
+                                        <!-- Document title -->
+                                        <TextBlock Grid.Column="2" Text="{Binding Title}" MaxWidth="160"
+                                                   TextTrimming="CharacterEllipsis" VerticalAlignment="Center"
+                                                   Margin="6,0,6,0">
+                                            <TextBlock.Style>
+                                                <Style TargetType="TextBlock">
+                                                    <Setter Property="Foreground" Value="{DynamicResource Brush.TextSecondary}"/>
+                                                    <Setter Property="FontWeight" Value="Normal"/>
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                                            <Setter Property="Foreground" Value="{DynamicResource Brush.Text}"/>
+                                                            <Setter Property="FontWeight" Value="SemiBold"/>
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </TextBlock.Style>
+                                        </TextBlock>
+
+                                        <!-- Close tab button -->
+                                        <Button Grid.Column="3" Style="{StaticResource TabCloseButton}" Click="CloseTabButton_Click"
+                                                AutomationProperties.Name="Close tab"/>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+
+                <!-- New tab button -->
+                <Button Grid.Column="1" Style="{StaticResource IconButton}" Width="30" Height="28" Margin="4,0,8,0" Content="&#xE710;"
+                        Click="NewTab_Click" ToolTip="New tab (Ctrl+T)" AutomationProperties.Name="New tab"/>
+            </Grid>
+        </Border>
+
         <!-- ===== Command bar ===== -->
-        <Border x:Name="CommandBar" Background="{DynamicResource Brush.Chrome}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="0,0,0,1" Padding="6">
+        <Border x:Name="CommandBar" Grid.Row="1" Background="{DynamicResource Brush.Chrome}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="0,0,0,1" Padding="6">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -100,7 +210,7 @@
         </Border>
 
         <!-- ===== Body ===== -->
-        <Grid Grid.Row="1">
+        <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="RailColumn" Width="Auto"/>
                 <ColumnDefinition x:Name="SidebarColumn" Width="260" MinWidth="0" MaxWidth="560"/>
@@ -367,7 +477,7 @@
         </Grid>
 
         <!-- ===== Status bar ===== -->
-        <Border x:Name="StatusBar" Grid.Row="2" Background="{DynamicResource Brush.Chrome}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="0,1,0,0" Padding="14,5"
+        <Border x:Name="StatusBar" Grid.Row="3" Background="{DynamicResource Brush.Chrome}" BorderBrush="{DynamicResource Brush.Border}" BorderThickness="0,1,0,0" Padding="14,5"
                 Visibility="{Binding HasDocument, Converter={StaticResource BoolToVisibility}}">
             <DockPanel>
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">

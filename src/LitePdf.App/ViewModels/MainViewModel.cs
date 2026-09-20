@@ -53,6 +53,36 @@ public sealed class MainViewModel : ObservableObject
     private string _textSourceText = "";
     private bool _isFullScreen;
     private bool _isReadingAloud;
+    private DocumentTab? _activeTab;
+
+    public MainViewModel()
+    {
+        Tabs.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasTabs));
+            OnPropertyChanged(nameof(TabCount));
+        };
+    }
+
+    public ObservableCollection<DocumentTab> Tabs { get; } = [];
+
+    public DocumentTab? ActiveTab
+    {
+        get => _activeTab;
+        set
+        {
+            if (Set(ref _activeTab, value))
+            {
+                OnPropertyChanged(nameof(HasTabs));
+                OnPropertyChanged(nameof(TabCount));
+                OnPropertyChanged(nameof(WindowTitle));
+            }
+        }
+    }
+
+    public bool HasTabs => Tabs.Count > 0;
+
+    public int TabCount => Tabs.Count;
 
     public bool HasDocument { get => _hasDocument; set { if (Set(ref _hasDocument, value)) OnPropertyChanged(nameof(WindowTitle)); } }
 

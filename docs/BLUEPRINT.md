@@ -132,15 +132,22 @@ Themes/Light|Dark.xaml   color tokens (Brush.*). ThemeManager swaps the palette 
                          merged dictionaries win lookups)
 Themes/Styles.xaml       complete control styles (buttons, inputs, menus, lists, tree, scrollbars, tooltips, dialogs)
 Infrastructure/          Mvvm, Log, ErrorReporter (non-reentrant), ThemeManager, NativeWindow (dark title bar),
-                         converters, LruCache, Icons, ClipboardHelper (retries), PrintService, SpeechService
+                         converters, LruCache, Icons, ClipboardHelper (retries), PrintService, SpeechService,
+                         SingleInstance (named pipe IPC + session mutex)
 Documents/               DocumentSession, ImageDocument (PNG/JPEG/TIFF… as pages), RenderCache + PageRenderer
 Viewer/                  PdfViewer (input, zoom, selection, search hits), PagesPanel (IScrollInfo virtualization),
                          PageVisual (bitmap + detail tile + overlays)
-ViewModels/              MainViewModel (bindable state) + item view models
+ViewModels/              MainViewModel (bindable state), DocumentTab (per-tab state) + item view models
 Views/Dialogs.cs         DialogWindow base, message/password/text input/OCR result/properties/settings dialogs
-MainWindow*.cs           Window controller split by area: core (keys, menus, layout), Document (open/save/print),
+MainWindow*.cs           Window controller split by area: core (keys, menus, layout), Document (open/save/print/tabs),
                          Panels (thumbnails, chapters, search, annotations), Actions (copy, markup, notes, OCR)
 ```
+
+### Tabs & Single-Instance IPC
+- **Single-instance:** Second instance checks session mutex `Local\LitePDF-SingleInstance-{User}` and sends open arguments via named pipe `LitePDF-IPC-{User}` to the primary instance, then exits immediately.
+- **Tabs:** Each document runs in a `DocumentTab` inside `MainWindow`. Tab strip displays document icon, name, dirty dot indicator, and close button `×`.
+- **View state preservation:** Switching tabs preserves reading position, zoom, rotation, thumbnails, outline, search queries and results.
+- **Close safety:** Closing the window with multiple tabs open prompts with a warning dialog to prevent accidental loss; individual tab close prompts on unsaved changes.
 
 ### DocumentSession
 - Owns the `IPdfDocument` plus derived state:

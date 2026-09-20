@@ -101,6 +101,7 @@ public sealed class PdfViewer : Border
     public TextRange? Selection { get; private set; }
     public PdfAnnotation? SelectedAnnotation { get; private set; }
     public SearchHitRef? CurrentSearchHit { get; private set; }
+    public IReadOnlyDictionary<int, IReadOnlyList<TextMatch>>? SearchHits => _searchHits;
     internal RegionDraftState? RegionDraft { get; private set; }
 
     public ViewerTool Tool
