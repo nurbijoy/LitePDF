@@ -422,7 +422,8 @@ internal static class MessageDialogProbe
         new PasswordDialog(null, "file.pdf", retry: true).Close();
         new TextInputDialog(null, "Note", "Message", "Text", "Save", multiline: true, allowDelete: true).Close();
         new OcrResultDialog(null, "Recognized", "en-US", () => { }).Close();
-        new PropertiesDialog(null, new DocumentInfo("C:\a.pdf", 1234, 3, "1.7", true, "T", "A", "S", "K", "C", "P", DateTimeOffset.Now, DateTimeOffset.Now), new PageSize(612, 792)).Close();
+        new PropertiesDialog(null, new DocumentInfo("C:\\a.pdf", 1234, 3, "1.7", true, "T", "A", "S", "K", "C", "P", DateTimeOffset.Now, DateTimeOffset.Now), new PageSize(612, 792)).Close();
         new SettingsDialog(null, new AppSettings(), ["en-US"], () => { }).Close();
+        new PrintDialogWindow(null, null, 0, "Test").Close();
     }
 }

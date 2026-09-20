@@ -335,7 +335,7 @@ public partial class MainWindow
         if (_session is not { } session) return;
         try
         {
-            if (await PrintService.PrintAsync(session.Document, session.DisplayName) is int pages)
+            if (await PrintService.PrintAsync(session.Document, session.DisplayName, Viewer.CurrentPageIndex, this) is int pages)
                 ShowToast(pages == 1 ? "Sent 1 page to the printer" : $"Sent {pages} pages to the printer");
         }
         catch (Exception ex)

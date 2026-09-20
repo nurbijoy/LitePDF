@@ -12,6 +12,8 @@ using Windows.Media.Core;
 using WinMediaPlayer = Windows.Media.Playback.MediaPlayer;
 using Windows.Media.SpeechSynthesis;
 
+using LitePdf.App.Views;
+
 namespace LitePdf.App.Infrastructure;
 
 public static class ClipboardHelper
@@ -46,24 +48,30 @@ public static class ClipboardHelper
 public static class PrintService
 {
     /// <summary>Shows the print dialog, then renders and spools pages.</summary>
-    public static async Task<int?> PrintAsync(IPdfDocument document, string jobName)
+    public static async Task<int?> PrintAsync(IPdfDocument document, string jobName, int currentPage = 0, Window? owner = null)
     {
-        var dialog = new PrintDialog
-        {
-            UserPageRangeEnabled = true,
-            MinPage = 1,
-            MaxPage = (uint)document.PageCount,
-            PageRange = new PageRange(1, document.PageCount),
-        };
-        if (dialog.ShowDialog() != true) return null;
+        var request = PrintDialogWindow.Show(owner, document, currentPage, jobName);
+        if (request is null) return null;
 
-        var range = dialog.PageRangeSelection == PageRangeSelection.UserPages ? dialog.PageRange : new PageRange(1, document.PageCount);
-        var pages = Enumerable.Range(Math.Max(1, range.PageFrom), Math.Max(0, Math.Min(document.PageCount, range.PageTo) - Math.Max(1, range.PageFrom) + 1))
-            .Select(p => p - 1).ToList();
+        var queue = request.Queue;
+        var ticket = request.Ticket;
+        var pages = request.Pages;
+        var orientation = request.Orientation;
+        var colorMode = request.ColorMode;
+
         if (pages.Count == 0) return 0;
 
-        double areaW = dialog.PrintableAreaWidth > 0 ? dialog.PrintableAreaWidth : 816;
-        double areaH = dialog.PrintableAreaHeight > 0 ? dialog.PrintableAreaHeight : 1056;
+        double areaW = 816, areaH = 1056;
+        try
+        {
+            var caps = queue.GetPrintCapabilities(ticket);
+            if (caps.OrientedPageMediaWidth is double pw && pw > 0) areaW = pw;
+            if (caps.OrientedPageMediaHeight is double ph && ph > 0) areaH = ph;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Could not query printable area from print capabilities");
+        }
         var area = new Size(areaW, areaH);
 
         await Task.Yield();
@@ -72,7 +80,8 @@ public static class PrintService
         Mouse.OverrideCursor = Cursors.Wait;
         try
         {
-            dialog.PrintDocument(new PdfPaginator(document, pages, area), jobName);
+            var writer = PrintQueue.CreateXpsDocumentWriter(queue);
+            writer.Write(new PdfPaginator(document, pages, area, orientation, colorMode), ticket);
             return pages.Count;
         }
         catch (PrintingCanceledException)
@@ -85,7 +94,12 @@ public static class PrintService
         }
     }
 
-    private sealed class PdfPaginator(IPdfDocument document, IReadOnlyList<int> pages, Size area) : DocumentPaginator
+    private sealed class PdfPaginator(
+        IPdfDocument document,
+        IReadOnlyList<int> pages,
+        Size area,
+        PrintOrientation orientation,
+        PrintColorMode colorMode) : DocumentPaginator
     {
         public override bool IsPageCountValid => true;
         public override int PageCount => pages.Count;
@@ -98,11 +112,27 @@ public static class PrintService
             var size = document.PageSizes[pageIndex];
             double w = size.Width * ViewMath.PointsToDip, h = size.Height * ViewMath.PointsToDip;
 
-            // Rotate landscape pages onto portrait paper (and vice versa) when that makes them larger.
-            double scaleUpright = Math.Min(PageSize.Width / w, PageSize.Height / h);
-            double scaleRotated = Math.Min(PageSize.Width / h, PageSize.Height / w);
-            int rotation = scaleRotated > scaleUpright * 1.05 ? 1 : 0;
-            double scale = Math.Min(1, rotation == 1 ? scaleRotated : scaleUpright);
+            int rotation;
+            double scale;
+            if (orientation == PrintOrientation.Portrait)
+            {
+                rotation = 0;
+                scale = Math.Min(1, Math.Min(PageSize.Width / w, PageSize.Height / h));
+            }
+            else if (orientation == PrintOrientation.Landscape)
+            {
+                rotation = 1;
+                scale = Math.Min(1, Math.Min(PageSize.Width / h, PageSize.Height / w));
+            }
+            else
+            {
+                // Auto: rotate if landscape orientation yields larger scale
+                double scaleUpright = Math.Min(PageSize.Width / w, PageSize.Height / h);
+                double scaleRotated = Math.Min(PageSize.Width / h, PageSize.Height / w);
+                rotation = scaleRotated > scaleUpright * 1.05 ? 1 : 0;
+                scale = Math.Min(1, rotation == 1 ? scaleRotated : scaleUpright);
+            }
+
             double drawW = (rotation == 1 ? h : w) * scale, drawH = (rotation == 1 ? w : h) * scale;
 
             const double dpi = 300;
@@ -111,6 +141,19 @@ public static class PrintService
             ph = Math.Max(1, ph);
             var rendered = document.RenderAsync(pageIndex, pw, ph, rotation, null, RenderFlags.Annotations | RenderFlags.Printing, RenderPriority.Background)
                 .GetAwaiter().GetResult();
+
+            if (colorMode == PrintColorMode.Grayscale)
+            {
+                var pixels = rendered.Pixels;
+                for (int i = 0; i + 3 < pixels.Length; i += 4)
+                {
+                    byte gray = (byte)((pixels[i + 2] * 299 + pixels[i + 1] * 587 + pixels[i] * 114) / 1000);
+                    pixels[i] = gray;
+                    pixels[i + 1] = gray;
+                    pixels[i + 2] = gray;
+                }
+            }
+
             var bitmap = PageRenderer.ToBitmapSource(rendered);
 
             var visual = new DrawingVisual();
