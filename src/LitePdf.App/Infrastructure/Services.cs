@@ -62,15 +62,23 @@ public static class PrintService
         if (pages.Count == 0) return 0;
 
         double areaW = 816, areaH = 1056;
-        try
+        if (request.MediaSize?.Width is double mw && mw > 0 && request.MediaSize?.Height is double mh && mh > 0)
         {
-            var caps = queue.GetPrintCapabilities(ticket);
-            if (caps.OrientedPageMediaWidth is double pw && pw > 0) areaW = pw;
-            if (caps.OrientedPageMediaHeight is double ph && ph > 0) areaH = ph;
+            areaW = mw;
+            areaH = mh;
         }
-        catch (Exception ex)
+        else
         {
-            Log.Error(ex, "Could not query printable area from print capabilities");
+            try
+            {
+                var caps = queue.GetPrintCapabilities(ticket);
+                if (caps.OrientedPageMediaWidth is double pw && pw > 0) areaW = pw;
+                if (caps.OrientedPageMediaHeight is double ph && ph > 0) areaH = ph;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Could not query printable area from print capabilities");
+            }
         }
         var area = new Size(areaW, areaH);
 

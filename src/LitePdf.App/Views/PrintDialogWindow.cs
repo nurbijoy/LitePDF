@@ -32,6 +32,7 @@ public sealed class PrintRequest
     public required IReadOnlyList<int> Pages { get; init; }
     public required PrintOrientation Orientation { get; init; }
     public required PrintColorMode ColorMode { get; init; }
+    public PageMediaSize? MediaSize { get; init; }
 }
 
 /// <summary>Fluent-styled print dialog: printer selection, page range, duplex, orientation, color mode, and live preview.</summary>
@@ -53,6 +54,7 @@ public sealed class PrintDialogWindow : DialogWindow
     private TextBox _copiesBox = null!;
     private CheckBox _collateCheck = null!;
     private ComboBox _duplexCombo = null!;
+    private ComboBox _paperSizeCombo = null!;
     private ComboBox _orientationCombo = null!;
     private ComboBox _colorCombo = null!;
     private Image _previewImage = null!;
@@ -275,9 +277,16 @@ public sealed class PrintDialogWindow : DialogWindow
         duplexSection.Children.Add(_duplexCombo);
         settingsPanel.Children.Add(duplexSection);
 
-        // 5. Orientation & Color
-        var layoutSection = CreateSection("Layout & Color");
-        var layoutGrid = new Grid { Margin = new Thickness(0, 4, 0, 6) };
+        // 5. Paper, Orientation & Color
+        var layoutSection = CreateSection("Paper & Layout");
+        var paperStack = new StackPanel { Margin = new Thickness(0, 4, 0, 8) };
+        paperStack.Children.Add(new TextBlock { Text = "Paper size", Style = (Style)FindResource("Caption"), Margin = new Thickness(0, 0, 0, 4) });
+        _paperSizeCombo = new ComboBox();
+        _paperSizeCombo.SelectionChanged += (_, _) => UpdatePreview();
+        paperStack.Children.Add(_paperSizeCombo);
+        layoutSection.Children.Add(paperStack);
+
+        var layoutGrid = new Grid { Margin = new Thickness(0, 0, 0, 6) };
         layoutGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         layoutGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(12) });
         layoutGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -457,6 +466,53 @@ public sealed class PrintDialogWindow : DialogWindow
             PrintCapabilities? caps = null;
             try { caps = queue.GetPrintCapabilities(queue.DefaultPrintTicket); } catch { }
 
+            // Populate paper sizes (A4 default)
+            _paperSizeCombo.Items.Clear();
+            int selectedPaperIndex = -1;
+            int a4Index = -1;
+            int letterIndex = -1;
+
+            if (caps?.PageMediaSizeCapability is { Count: > 0 } sizes)
+            {
+                var defSize = queue.DefaultPrintTicket?.PageMediaSize;
+                int idx = 0;
+                foreach (var s in sizes)
+                {
+                    string label = GetPaperSizeDisplayName(s);
+                    _paperSizeCombo.Items.Add(new ComboBoxItem { Content = label, Tag = s });
+
+                    if (s.PageMediaSizeName == PageMediaSizeName.ISOA4 ||
+                        (s.Width is double w && s.Height is double h && Math.Abs(w - 793.7) < 15 && Math.Abs(h - 1122.5) < 15))
+                    {
+                        a4Index = idx;
+                    }
+                    else if (s.PageMediaSizeName == PageMediaSizeName.NorthAmericaLetter ||
+                             (s.Width is double lw && s.Height is double lh && Math.Abs(lw - 816) < 15 && Math.Abs(lh - 1056) < 15))
+                    {
+                        letterIndex = idx;
+                    }
+
+                    if (defSize is not null && s.PageMediaSizeName == defSize.PageMediaSizeName)
+                    {
+                        selectedPaperIndex = idx;
+                    }
+                    idx++;
+                }
+            }
+
+            if (_paperSizeCombo.Items.Count == 0)
+            {
+                _paperSizeCombo.Items.Add(new ComboBoxItem { Content = "A4 (210 × 297 mm)", Tag = new PageMediaSize(PageMediaSizeName.ISOA4) });
+                _paperSizeCombo.Items.Add(new ComboBoxItem { Content = "Letter (8.5 × 11 in)", Tag = new PageMediaSize(PageMediaSizeName.NorthAmericaLetter) });
+                a4Index = 0;
+            }
+
+            // Prefer A4 by default as requested
+            if (a4Index >= 0) _paperSizeCombo.SelectedIndex = a4Index;
+            else if (selectedPaperIndex >= 0) _paperSizeCombo.SelectedIndex = selectedPaperIndex;
+            else if (letterIndex >= 0) _paperSizeCombo.SelectedIndex = letterIndex;
+            else _paperSizeCombo.SelectedIndex = 0;
+
             // Check duplex capabilities
             bool supportsDuplex = caps?.DuplexingCapability.Any(d => d is Duplexing.TwoSidedLongEdge or Duplexing.TwoSidedShortEdge) == true;
             _duplexCombo.IsEnabled = supportsDuplex;
@@ -492,6 +548,30 @@ public sealed class PrintDialogWindow : DialogWindow
         }
 
         UpdatePrintButtonState();
+    }
+
+    private static string GetPaperSizeDisplayName(PageMediaSize mediaSize)
+    {
+        if (mediaSize.PageMediaSizeName is { } name)
+        {
+            return name switch
+            {
+                PageMediaSizeName.ISOA4 => "A4 (210 × 297 mm)",
+                PageMediaSizeName.NorthAmericaLetter => "Letter (8.5 × 11 in)",
+                PageMediaSizeName.NorthAmericaLegal => "Legal (8.5 × 14 in)",
+                PageMediaSizeName.ISOA3 => "A3 (297 × 420 mm)",
+                PageMediaSizeName.ISOA5 => "A5 (148 × 210 mm)",
+                PageMediaSizeName.NorthAmericaExecutive => "Executive (7.25 × 10.5 in)",
+                PageMediaSizeName.NorthAmericaTabloid => "Tabloid (11 × 17 in)",
+                _ => name.ToString().Replace("NorthAmerica", "").Replace("ISO", "")
+            };
+        }
+        if (mediaSize.Width is double w && mediaSize.Height is double h && w > 0 && h > 0)
+        {
+            double inW = w / 96.0, inH = h / 96.0;
+            return $"{inW:0.#} × {inH:0.#} in";
+        }
+        return "Custom";
     }
 
     private void OnCustomPagesChanged(int maxPage)
@@ -600,12 +680,14 @@ public sealed class PrintDialogWindow : DialogWindow
         var duplex = (_duplexCombo.SelectedItem as ComboBoxItem)?.Tag as Duplexing? ?? Duplexing.OneSided;
         var orientation = (_orientationCombo.SelectedItem as ComboBoxItem)?.Tag as PrintOrientation? ?? PrintOrientation.Auto;
         var colorMode = (_colorCombo.SelectedItem as ComboBoxItem)?.Tag as PrintColorMode? ?? PrintColorMode.Color;
+        var mediaSize = (_paperSizeCombo.SelectedItem as ComboBoxItem)?.Tag as PageMediaSize;
 
         var ticket = queue.UserPrintTicket?.Clone() ?? queue.DefaultPrintTicket?.Clone() ?? new PrintTicket();
         ticket.CopyCount = copies;
         ticket.Duplexing = duplex;
         ticket.Collation = _collateCheck.IsChecked == true ? Collation.Collated : Collation.Uncollated;
         ticket.OutputColor = colorMode == PrintColorMode.Grayscale ? OutputColor.Grayscale : OutputColor.Color;
+        if (mediaSize is not null) ticket.PageMediaSize = mediaSize;
 
         if (orientation == PrintOrientation.Portrait) ticket.PageOrientation = PageOrientation.Portrait;
         else if (orientation == PrintOrientation.Landscape) ticket.PageOrientation = PageOrientation.Landscape;
@@ -617,6 +699,7 @@ public sealed class PrintDialogWindow : DialogWindow
             Pages = _selectedPages.ToList(),
             Orientation = orientation,
             ColorMode = colorMode,
+            MediaSize = mediaSize,
         };
 
         DialogResult = true;
