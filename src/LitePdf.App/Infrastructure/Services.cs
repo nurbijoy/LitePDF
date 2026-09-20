@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using LitePdf.App.Documents;
@@ -44,8 +45,8 @@ public static class ClipboardHelper
 
 public static class PrintService
 {
-    /// <summary>Shows the print dialog, then renders and spools pages on a background STA thread.</summary>
-    public static Task<int?> PrintAsync(IPdfDocument document, string jobName)
+    /// <summary>Shows the print dialog, then renders and spools pages.</summary>
+    public static async Task<int?> PrintAsync(IPdfDocument document, string jobName)
     {
         var dialog = new PrintDialog
         {
@@ -54,34 +55,34 @@ public static class PrintService
             MaxPage = (uint)document.PageCount,
             PageRange = new PageRange(1, document.PageCount),
         };
-        if (dialog.ShowDialog() != true) return Task.FromResult<int?>(null);
+        if (dialog.ShowDialog() != true) return null;
 
         var range = dialog.PageRangeSelection == PageRangeSelection.UserPages ? dialog.PageRange : new PageRange(1, document.PageCount);
         var pages = Enumerable.Range(Math.Max(1, range.PageFrom), Math.Max(0, Math.Min(document.PageCount, range.PageTo) - Math.Max(1, range.PageFrom) + 1))
             .Select(p => p - 1).ToList();
-        var queue = dialog.PrintQueue;
-        var ticket = dialog.PrintTicket;
-        var area = new Size(dialog.PrintableAreaWidth, dialog.PrintableAreaHeight);
+        if (pages.Count == 0) return 0;
 
-        var tcs = new TaskCompletionSource<int?>();
-        var thread = new Thread(() =>
+        double areaW = dialog.PrintableAreaWidth > 0 ? dialog.PrintableAreaWidth : 816;
+        double areaH = dialog.PrintableAreaHeight > 0 ? dialog.PrintableAreaHeight : 1056;
+        var area = new Size(areaW, areaH);
+
+        await Task.Yield();
+
+        var prevCursor = Mouse.OverrideCursor;
+        Mouse.OverrideCursor = Cursors.Wait;
+        try
         {
-            try
-            {
-                var writer = PrintQueue.CreateXpsDocumentWriter(queue);
-                writer.Write(new PdfPaginator(document, pages, area), ticket);
-                tcs.SetResult(pages.Count);
-            }
-            catch (Exception ex)
-            {
-                tcs.SetException(ex);
-            }
-        });
-        thread.SetApartmentState(ApartmentState.STA);
-        thread.IsBackground = true;
-        thread.Name = "Print";
-        thread.Start();
-        return tcs.Task;
+            dialog.PrintDocument(new PdfPaginator(document, pages, area), jobName);
+            return pages.Count;
+        }
+        catch (PrintingCanceledException)
+        {
+            return null;
+        }
+        finally
+        {
+            Mouse.OverrideCursor = prevCursor;
+        }
     }
 
     private sealed class PdfPaginator(IPdfDocument document, IReadOnlyList<int> pages, Size area) : DocumentPaginator
@@ -101,11 +102,13 @@ public static class PrintService
             double scaleUpright = Math.Min(PageSize.Width / w, PageSize.Height / h);
             double scaleRotated = Math.Min(PageSize.Width / h, PageSize.Height / w);
             int rotation = scaleRotated > scaleUpright * 1.05 ? 1 : 0;
-            double scale = Math.Min(1, Math.Max(scaleUpright, scaleRotated));
+            double scale = Math.Min(1, rotation == 1 ? scaleRotated : scaleUpright);
             double drawW = (rotation == 1 ? h : w) * scale, drawH = (rotation == 1 ? w : h) * scale;
 
             const double dpi = 300;
             var (pw, ph) = ViewMath.ClampToMax((int)(drawW / 96 * dpi), (int)(drawH / 96 * dpi), 7000);
+            pw = Math.Max(1, pw);
+            ph = Math.Max(1, ph);
             var rendered = document.RenderAsync(pageIndex, pw, ph, rotation, null, RenderFlags.Annotations | RenderFlags.Printing, RenderPriority.Background)
                 .GetAwaiter().GetResult();
             var bitmap = PageRenderer.ToBitmapSource(rendered);

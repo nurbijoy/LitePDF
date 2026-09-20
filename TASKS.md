@@ -81,7 +81,7 @@ Core, PDFium wrapper, OCR and the WPF app were rewritten. The previous implement
 
 ### Implemented but not yet exercised in the UI (covered by unit/self tests or code review only)
 - [ ] Password-protected PDFs: no encrypted sample yet. Needs a sample and a manual test of the prompt/retry flow.
-- [ ] Printing: dialog, page range, background spooling. Test on a real printer and with "Microsoft Print to PDF".
+- [x] Printing: dialog, page range, spooling via PrintDialog.PrintDocument (fixed cross-thread Dispatcher access error).
 - [ ] Read aloud (Windows voices), export annotations to Markdown, recolor/delete annotation from the context menu,
       underline/strikethrough, recognize all pages with cancel, paste image from clipboard, open image files (TIFF multi-frame)
 - [ ] Links: external link confirmation dialog, blocked non-web schemes
