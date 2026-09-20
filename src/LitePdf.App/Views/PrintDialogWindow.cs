@@ -69,7 +69,7 @@ public sealed class PrintDialogWindow : DialogWindow
     private PrintRequest? _result;
 
     internal PrintDialogWindow(Window? owner, IPdfDocument? document, int currentPage, string jobName)
-        : base(owner, "Print")
+        : base(owner, "Lite PDF Print")
     {
         _document = document;
         _currentPage = Math.Max(0, Math.Min(document?.PageCount - 1 ?? 0, currentPage));
