@@ -313,7 +313,21 @@ public partial class MainWindow : Window
         OpenMenu(items, MoreMenuButton);
     }
 
-    private void RailButton_Click(object sender, RoutedEventArgs e) => _vm.IsSidebarOpen = true;
+    private void RailButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { Tag: string tag } && Enum.TryParse<SidebarPanel>(tag, out var panel))
+        {
+            if (_vm.IsSidebarOpen && _vm.SelectedPanel == panel)
+            {
+                _vm.IsSidebarOpen = false;
+            }
+            else
+            {
+                _vm.SelectedPanel = panel;
+                _vm.IsSidebarOpen = true;
+            }
+        }
+    }
 
     private void SidebarSplitter_DragCompleted(object sender, DragCompletedEventArgs e)
     {
@@ -348,7 +362,6 @@ public partial class MainWindow : Window
     {
         _vm.IsFullScreen = !_vm.IsFullScreen;
         bool full = _vm.IsFullScreen;
-        TabRow.Height = full ? new GridLength(0) : GridLength.Auto;
         CommandRow.Height = full ? new GridLength(0) : GridLength.Auto;
         StatusRow.Height = full ? new GridLength(0) : GridLength.Auto;
         RailColumn.Width = full ? new GridLength(0) : GridLength.Auto;
@@ -618,8 +631,8 @@ public partial class MainWindow : Window
     {
         if (e.OriginalSource is DependencyObject dep)
         {
-            for (var el = dep; el is not null and not Border; el = VisualTreeHelper.GetParent(el))
-                if (el is Button) return; // clicked close button
+            for (DependencyObject? el = dep; el is not null && el != sender; el = VisualTreeHelper.GetParent(el))
+                if (el is ButtonBase) return; // clicked close button
         }
         if ((sender as FrameworkElement)?.DataContext is DocumentTab tab)
             SelectTab(tab);

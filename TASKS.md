@@ -2,7 +2,11 @@
 
 ## Multi-tab document support and single-instance IPC (2026-09-20, T-F1)
 - **Single-instance process management:** Added `SingleInstance` using session-scoped mutex (`Local\LitePDF-SingleInstance-{User}`) and asynchronous named pipe IPC (`LitePDF-IPC-{User}`). When opening additional documents from Explorer or command line, arguments are sent to the running instance and the new process exits with code 0.
-- **Fluent tab strip:** Top-level tab row (`TabBar`) showing open document tabs with document icons, filename with truncation, dirty dot indicator (`●`), and compact close button (`×`). Includes `+` button to open a new tab.
+- **Sidebar document tabs (Zero vertical space overhead):** Moved document tabs into the sidebar (`SidebarPanel.Documents`), eliminating the top tab bar row so the PDF viewer retains 100% of the window's vertical height.
+  - Rail button for `Documents` (`&#xE8A5;`, `Ctrl+T`) opens the tab list.
+  - Shows all open document tabs with document icons, filename with ellipsis, dirty dot indicator (`●`), and close button (`×`).
+  - Sidebar header includes a `+` (New tab) button when the Documents panel is active.
+- **Sidebar tab toggle on click:** Clicking an active rail button collapses/closes the sidebar; clicking an inactive rail button opens/switches to that panel; rail buttons cleanly uncheck when the sidebar is collapsed.
 - **Tab management:**
   - Individual tab close via `×` button, middle-click, context menu, or `Ctrl+W`. Prompts to save if modified.
   - Tab switching (`Ctrl+Tab`, `Ctrl+Shift+Tab`, or click) preserves view state (page, offset, zoom, rotation, layout mode), thumbnails, outline, search queries, hits, and annotations.

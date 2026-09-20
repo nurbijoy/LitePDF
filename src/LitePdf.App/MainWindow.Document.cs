@@ -137,8 +137,11 @@ public partial class MainWindow
         _vm.CanAnnotate = tab.CanAnnotate;
         _vm.Tool = ViewerTool.Select;
         _vm.StatusText = "";
-        _vm.SelectedPanel = tab.SelectedPanel;
-        _vm.IsSidebarOpen = tab.IsSidebarOpen;
+        if (_vm.SelectedPanel != SidebarPanel.Documents)
+        {
+            _vm.SelectedPanel = tab.SelectedPanel;
+            _vm.IsSidebarOpen = tab.IsSidebarOpen;
+        }
         UpdateSidebarVisibility();
 
         Viewer.Open(tab.Session, tab.ViewState, _settings.DefaultZoomMode);

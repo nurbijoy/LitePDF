@@ -10,6 +10,7 @@ namespace LitePdf.App.ViewModels;
 
 public enum SidebarPanel
 {
+    Documents,
     Thumbnails,
     Chapters,
     Search,
@@ -130,7 +131,15 @@ public sealed class MainViewModel : ObservableObject
 
     public string ZoomText { get => _zoomText; set => Set(ref _zoomText, value); }
 
-    public bool IsSidebarOpen { get => _isSidebarOpen; set => Set(ref _isSidebarOpen, value); }
+    public bool IsSidebarOpen
+    {
+        get => _isSidebarOpen;
+        set
+        {
+            if (!Set(ref _isSidebarOpen, value)) return;
+            NotifyPanelStates();
+        }
+    }
 
     public SidebarPanel SelectedPanel
     {
@@ -138,21 +147,29 @@ public sealed class MainViewModel : ObservableObject
         set
         {
             if (!Set(ref _selectedPanel, value)) return;
-            OnPropertyChanged(nameof(IsThumbnailsPanel));
-            OnPropertyChanged(nameof(IsChaptersPanel));
-            OnPropertyChanged(nameof(IsSearchPanel));
-            OnPropertyChanged(nameof(IsAnnotationsPanel));
+            NotifyPanelStates();
             OnPropertyChanged(nameof(SidebarTitle));
         }
     }
 
-    public bool IsThumbnailsPanel { get => SelectedPanel == SidebarPanel.Thumbnails; set { if (value) SelectedPanel = SidebarPanel.Thumbnails; } }
-    public bool IsChaptersPanel { get => SelectedPanel == SidebarPanel.Chapters; set { if (value) SelectedPanel = SidebarPanel.Chapters; } }
-    public bool IsSearchPanel { get => SelectedPanel == SidebarPanel.Search; set { if (value) SelectedPanel = SidebarPanel.Search; } }
-    public bool IsAnnotationsPanel { get => SelectedPanel == SidebarPanel.Annotations; set { if (value) SelectedPanel = SidebarPanel.Annotations; } }
+    private void NotifyPanelStates()
+    {
+        OnPropertyChanged(nameof(IsDocumentsPanel));
+        OnPropertyChanged(nameof(IsThumbnailsPanel));
+        OnPropertyChanged(nameof(IsChaptersPanel));
+        OnPropertyChanged(nameof(IsSearchPanel));
+        OnPropertyChanged(nameof(IsAnnotationsPanel));
+    }
+
+    public bool IsDocumentsPanel => IsSidebarOpen && SelectedPanel == SidebarPanel.Documents;
+    public bool IsThumbnailsPanel => IsSidebarOpen && SelectedPanel == SidebarPanel.Thumbnails;
+    public bool IsChaptersPanel => IsSidebarOpen && SelectedPanel == SidebarPanel.Chapters;
+    public bool IsSearchPanel => IsSidebarOpen && SelectedPanel == SidebarPanel.Search;
+    public bool IsAnnotationsPanel => IsSidebarOpen && SelectedPanel == SidebarPanel.Annotations;
 
     public string SidebarTitle => SelectedPanel switch
     {
+        SidebarPanel.Documents => "Documents",
         SidebarPanel.Chapters => "Chapters",
         SidebarPanel.Search => "Search",
         SidebarPanel.Annotations => "Annotations",
