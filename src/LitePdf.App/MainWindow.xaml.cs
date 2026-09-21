@@ -294,6 +294,7 @@ public partial class MainWindow : Window
         var items = new List<object?>
         {
             MenuItemFor("Save as…", Icons.SaveAs, () => Run(() => SaveAsync(saveAs: true)), "Ctrl+Shift+S", _session?.IsPdf == true),
+            MenuItemFor("Convert to Word…", Icons.Document, () => Run(ExportDocxAsync), null, hasDocument),
             MenuItemFor("Export annotations…", Icons.Export, () => Run(ExportAnnotationsAsync), null, _session?.CanAnnotate == true),
             null,
             colorModes,

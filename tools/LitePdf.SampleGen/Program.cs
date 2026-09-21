@@ -19,4 +19,21 @@ await using (var doc = await PdfiumDocument.OpenAsync(textPath))
 
 File.WriteAllBytes(Path.Combine(output, "sample-1000-pages.pdf"), SampleDocuments.CreateLargeDocument(1000));
 
+// A document with everything the Word export has to rebuild, and a plate at 200 DPI so the picture is
+// stored at a higher resolution than the size it is placed at.
+int plateWidth = 800, plateHeight = 600;
+var plate = new byte[plateWidth * plateHeight * 3];
+for (int y = 0; y < plateHeight; y++)
+{
+    for (int x = 0; x < plateWidth; x++)
+    {
+        int i = (y * plateWidth + x) * 3;
+        plate[i] = (byte)(x * 255 / plateWidth);
+        plate[i + 1] = (byte)(y * 255 / plateHeight);
+        plate[i + 2] = (byte)((x ^ y) & 0xFF);
+    }
+}
+File.WriteAllBytes(Path.Combine(output, "sample-formatted.pdf"),
+    SampleDocuments.CreateFormattedDocument(plate, plateWidth, plateHeight));
+
 Console.WriteLine($"Samples written to {output}");

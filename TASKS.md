@@ -1,5 +1,54 @@
 # TASKS
 
+## Convert to Word (.docx) (2026-09-21, T-F6)
+Editable reflow conversion: a PDF becomes a Word document with real paragraphs, character styling, images,
+lists, tables, headers and footers. Design and reasoning in `docs/DOCX-EXPORT.md`; architecture summary in
+`docs/BLUEPRINT.md` §5c/5d. No new NuGet package: a .docx is a ZIP of XML, so `ZipArchive` + `XmlWriter`
+is the whole writer.
+
+- **Reading (`PdfContentReader`, `LitePdf.Pdfium`):** per-character font family, size, weight, slope and
+  colour, read once per text object. Images lifted out as their original JPEG bytes where the stream is a
+  plain `DCTDecode`, otherwise rendered — and re-rendered from the page at the stored resolution when
+  PDFium's placed-size render would lose detail. Thin path rectangles collected as table rules. Invisible
+  (render mode 3) OCR text used only where a page has no visible text, and then its picture is skipped.
+- **Rebuilding (`ContentComposer`, `DocumentProfile`, `TableBuilder`, `LitePdf.Core`):** columns and reading
+  order, paragraphs, alignment and indent, headings (outline-driven where the PDF has one), bulleted and
+  numbered lists, ruled tables with column spans and vertical merges, running heads lifted into real Word
+  headers and footers with a live `PAGE` field, hyperlinks, highlights and paragraph joins across page breaks.
+- **Writing (`DocxWriter`):** OPC package with styles scaled to the measured body size, numbering, media,
+  headers/footers and per-page-size sections. Images are deduplicated by content hash.
+- **App:** "Convert to Word…" in the More menu, a dialog for page range and what to keep, progress with
+  cancel (the OCR progress card is now a general task card), and an optional OCR pass for scanned pages.
+  Saving goes through a temp file in the target folder and `File.Replace`, so a failure never truncates an
+  existing document.
+
+**Verification performed:**
+- Build: 0 errors, 0 warnings. 165 automated tests pass (86 new). `--self-test` passes, and it now
+  instantiates the export dialog in both themes.
+- Character conservation is asserted end to end: every visible character of the PDF reaches the .docx in
+  order, for the plain sample, a rotated page, a 200-page document and the new formatted sample.
+- Package validity is asserted on every written document: every part parses, every relationship id resolves
+  to a part that exists, and every extension has a content type.
+- `tools/LitePdf.SampleGen` now also writes `samples/generated/sample-formatted.pdf` — title, two heading
+  levels, ragged prose, a bulleted and a numbered list, a ruled three-column table, a 200 DPI plate with a
+  caption, and a running head and foot with a page number. Converted through the real pipeline: 5 headings,
+  6 list items, 1 table, 1 picture, correct header/footer, 72 pt margins recovered.
+- The WPF PNG encoder was checked separately for colour and alpha round-trip.
+- 1000-page document converts in about 9.5 s (6 s of it reading pages).
+
+### Known limits
+- **Tables without ruled lines are left as paragraphs.** Detecting them means deciding that two columns of
+  prose are a grid, and a false positive turns readable text into a mangled table. See `docs/DOCX-EXPORT.md`.
+- **Vector drawings are not yet carried over.** Paths are read only as table rules; charts and logos drawn
+  with path operators do not reach the .docx. Photographs and raster images do.
+- **Images inside form XObjects are skipped**, because a nested object's bounds are in the form's space.
+- **Fonts are referenced by name, not embedded.** A font that is not installed falls back to a similar one.
+- **Cell shading is not carried over** — the reader records rule geometry but not fill colour.
+- **Right-to-left and vertical text are untested.** Selection handles them; whether the composer's
+  short-line and indent rules survive them is unknown.
+- Not yet exercised by hand in the running app: the menu item, dialog and progress card were verified by the
+  self-test and by driving the pipeline directly, not by clicking through them.
+
 ## Multi-tab document support and single-instance IPC (2026-09-20, T-F1)
 - **Single-instance process management:** Added `SingleInstance` using session-scoped mutex (`Local\LitePDF-SingleInstance-{User}`) and asynchronous named pipe IPC (`LitePDF-IPC-{User}`). When opening additional documents from Explorer or command line, arguments are sent to the running instance and the new process exits with code 0.
 - **Sidebar document tabs (Zero vertical space overhead):** Moved document tabs into the sidebar (`SidebarPanel.Documents`), eliminating the top tab bar row so the PDF viewer retains 100% of the window's vertical height.
@@ -115,7 +164,9 @@ Core, PDFium wrapper, OCR and the WPF app were rewritten. The previous implement
 1. **T-V1** Manually verify the "not yet exercised" items above; add an encrypted sample to SampleGen (needs an RC4/AES writer or a checked-in small file).
 2. **T-P1** Measure startup with the ReadyToRun publish; profile startup (PDFium init, WPF theme load, DocumentKey hashing).
 3. **T-P2** Pool render buffers (`ArrayPool`) to reduce LOH churn; consider rendering bitmaps straight into `WriteableBitmap`.
-4. **T-F1** Tabs or multiple windows (currently one document per window; opening another replaces it after a save prompt).
+4. **T-F7** Word export, remaining work: vector drawings (rasterize a figure region with the text objects
+   switched off), images inside form XObjects, cell shading, and unruled tables behind a toggle once real
+   files say the detector is safe. See the known limits above.
 5. **T-F2** Save as searchable PDF: embed OCR text as invisible text (`FPDFText_SetText`, render mode 3).
 6. **T-F3** Additional OCR languages beyond Windows' set (e.g. Bengali/Hindi) via an optional Tesseract `IOcrEngine`.
    The layout pass is engine-agnostic (it works from `OcrLine`/`OcrWord` boxes), so it would carry over unchanged.

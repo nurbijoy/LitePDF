@@ -41,6 +41,11 @@ Everything above the PDFium layer uses **normalized page coordinates**: `RectD` 
 | `FractionSheet` | Lays every fraction half out as lines of type on one sheet for a second recognition pass, and reads the words back by position |
 | `OcrLayout` | Rebuilds the page from the recognizer's words: reading order by column, fractions, exponents, degree signs, figures |
 | `Storage` | `AppPaths`, atomic `JsonFile`, `AppSettings`, `RecentFileStore` (reading position per file), `DocumentKey` |
+| `PageContent` | What the DOCX export needs from a page: styled character spans, placed images, thin rules |
+| `ContentComposer` | Rebuilds a document from page geometry: columns, paragraphs, headings, lists, running heads |
+| `DocumentProfile` | Document-wide measurements: body size and font, text area, heading sizes, running heads |
+| `TableBuilder` | Ruled tables: snaps the hairline rectangles into a grid and finds the spans |
+| `DocxWriter` | Writes the Office Open XML package (`ZipArchive` + `XmlWriter`, no third-party library) |
 
 ## 4. PDFium (`LitePdf.Pdfium`)
 - **`PdfiumWorker`:** one thread, `PriorityQueue` + `Monitor.Wait/Pulse`.
@@ -97,6 +102,50 @@ Order of work in `WindowsOcrEngine.RecognizeAsync`:
 - **A figure is settled after the text is read.** Before it, a circled question number and a ruled table both
   look exactly like a drawing.
 
+## 5c. Word export (`Core/Export`, `PdfContentReader`)
+A PDF has no paragraphs, only positioned glyphs, so every structure in the .docx is inferred. The ordering
+principle is that **a rule that does not fire still leaves the content intact**: an unclaimed line becomes a
+correctly styled paragraph in the right place, and nothing is ever dropped to tidy the output.
+
+1. **`PdfContentReader`** (in `LitePdf.Pdfium`) reads the page: characters with their style, images and
+   thin rules. Style is read once per text object, not per character — a dense page has thousands of
+   characters and a handful of objects.
+   - The visible size is measured from the loose char box against the text matrix, because
+     `FPDFText_GetFontSize` reports the text-state size and ignores matrix scaling.
+   - A plain `DCTDecode` image is copied out as JPEG bytes, untouched. Anything else is rendered — and
+     because `FPDFImageObj_GetRenderedBitmap` renders at the size the image is *placed* at, a stored image
+     with more pixels than that is re-rendered from the page at its own resolution, or a 300 DPI scan would
+     come back at 72 DPI.
+   - Text drawn with render mode 3 is the invisible OCR layer under a scan. It is used only when the page
+     has no visible text of its own, and then the picture it sits under is skipped, or every word would be
+     written twice.
+2. **`DocumentProfile`** measures the document as a whole: body size (modal, weighted by characters),
+   body font, text area and the running heads. Running heads are settled first, because a page number in
+   the margin would otherwise drag the measured margins out to it.
+3. **`ContentComposer`** rebuilds each page: columns, then reading order, then paragraphs, then headings,
+   lists and tables. See §5d for why each rule is drawn where it is.
+4. **`DocxWriter`** writes the package. Everything goes through `XmlWriter`: one unescaped ampersand out of
+   a PDF is a "Word found unreadable content" prompt, which is a hard failure.
+
+### 5d. Why these rules and not others
+- **A line ends its paragraph only if the next line's first word would have fitted on it.** A fixed
+  fraction of the measure gets this wrong constantly: ragged-right prose routinely stops 20 pt short
+  because the next word is 30 pt wide, and that has ended nothing.
+- **Columns are looked for before spanning lines are.** The other way round, every line of an ordinary
+  single-column page looks like a spanning line, because there the line and the text area are one width.
+- **The outline settles heading levels.** A bookmark carries a page and a Y, which is exact information the
+  app already loads; it beats every font-size heuristic.
+- **Body size is measured globally.** Per page, every page's largest line becomes a heading.
+- **A line opening with a bullet or a number starts a new item** whatever the geometry says, or a list whose
+  items are all one line and all the same width reads as one paragraph.
+- **The page number in a running head is the digit run that tracks the page across every sample.**
+  "Section 1, page 1" has two, and on the first page they are both 1.
+- **Only ruled tables are rebuilt.** A table held together by alignment alone would mean deciding that two
+  columns of prose are a grid, and getting that wrong turns readable text into a mangled table.
+- **Left and top margins are the median; right and bottom are a high percentile capped by the facing
+  margin.** A page only reaches the right margin when its content is long enough, so the median there
+  reports the margins of the emptiest half of the document.
+
 ## 5b. Distribution
 - **`publish-msix.ps1`** additionally builds an unsigned, self-contained x64 MSIX for Microsoft Store upload.
   It requires the exact Store identity, publishes to a fresh staging directory, runs the app self-test, and
@@ -134,11 +183,13 @@ Themes/Styles.xaml       complete control styles (buttons, inputs, menus, lists,
 Infrastructure/          Mvvm, Log, ErrorReporter (non-reentrant), ThemeManager, NativeWindow (dark title bar),
                          converters, LruCache, Icons, ClipboardHelper (retries), PrintService, SpeechService,
                          SingleInstance (named pipe IPC + session mutex)
-Documents/               DocumentSession, ImageDocument (PNG/JPEG/TIFF… as pages), RenderCache + PageRenderer
+Documents/               DocumentSession, ImageDocument (PNG/JPEG/TIFF… as pages), RenderCache + PageRenderer,
+                         DocxExport (drives the Word conversion) + WpfImageEncoder
 Viewer/                  PdfViewer (input, zoom, selection, search hits), PagesPanel (IScrollInfo virtualization),
                          PageVisual (bitmap + detail tile + overlays)
 ViewModels/              MainViewModel (bindable state), DocumentTab (per-tab state) + item view models
 Views/Dialogs.cs         DialogWindow base, message/password/text input/OCR result/properties/settings dialogs
+Views/ExportDocxDialog   Page range and what to keep for the Word conversion
 MainWindow*.cs           Window controller split by area: core (keys, menus, layout), Document (open/save/print/tabs),
                          Panels (thumbnails, chapters, search, annotations), Actions (copy, markup, notes, OCR)
 ```

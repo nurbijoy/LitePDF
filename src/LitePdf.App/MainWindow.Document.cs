@@ -108,7 +108,7 @@ public partial class MainWindow
                 _session.AnnotationsChanged -= OnSessionAnnotationsChanged;
                 _session.DocumentReplaced -= OnSessionDocumentReplaced;
             }
-            _ocrCts?.Cancel();
+            _taskCts?.Cancel();
             _speech?.Stop();
             _vm.IsReadingAloud = false;
         }
@@ -308,7 +308,7 @@ public partial class MainWindow
     {
         var session = _session;
         SaveActiveTabState();
-        _ocrCts?.Cancel();
+        _taskCts?.Cancel();
         _searchCts?.Cancel();
         _annotationsCts?.Cancel();
         _speech?.Stop();
@@ -530,6 +530,79 @@ public partial class MainWindow
         catch (Exception ex)
         {
             ErrorReporter.Report(ex, "Printing failed.");
+        }
+    }
+
+    private async Task ExportDocxAsync()
+    {
+        if (_session is not { } session) return;
+        if (_vm.IsTaskRunning)
+        {
+            ShowToast("Another job is already running");
+            return;
+        }
+
+        if (ExportDocxDialog.Show(this, session.PageCount, Viewer.CurrentPageIndex, _ocr.IsAvailable) is not { } settings) return;
+
+        var save = new SaveFileDialog
+        {
+            Filter = "Word document (*.docx)|*.docx",
+            FileName = Path.GetFileNameWithoutExtension(session.DisplayName) + ".docx",
+            InitialDirectory = session.IsVirtual ? null : Path.GetDirectoryName(session.FilePath),
+            DefaultExt = ".docx",
+            AddExtension = true,
+            Title = "Convert to Word",
+        };
+        if (save.ShowDialog(this) != true) return;
+
+        var cts = _taskCts = new CancellationTokenSource();
+        var progress = new Progress<(double Fraction, string Text)>(report =>
+        {
+            _vm.TaskProgress = report.Fraction;
+            _vm.TaskProgressText = report.Text;
+        });
+
+        _vm.TaskTitle = "Converting to Word";
+        _vm.TaskProgressText = "Reading the document";
+        _vm.TaskProgress = 0;
+        _vm.IsTaskRunning = true;
+        try
+        {
+            await DocxExport.ExportAsync(session, save.FileName, settings, progress, cts.Token);
+            ShowToast(settings.Pages.Count == 1 ? "Converted 1 page to Word" : $"Converted {settings.Pages.Count} pages to Word");
+            RevealInExplorer(save.FileName);
+        }
+        catch (OperationCanceledException)
+        {
+            ShowToast("Conversion cancelled");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PdfiumException)
+        {
+            Log.Error(ex, "Converting to Word");
+            MessageDialog.Show(this, "Couldn't create the Word document",
+                $"{ex.Message}\n\nThe PDF wasn't changed. Try saving to another folder.", isError: true);
+        }
+        catch (Exception ex)
+        {
+            ErrorReporter.Report(ex, "The document could not be converted to Word.");
+        }
+        finally
+        {
+            if (ReferenceEquals(_taskCts, cts)) _taskCts = null;
+            _vm.IsTaskRunning = false;
+        }
+    }
+
+    /// <summary>Opens Explorer with the new file selected, which is what people do next anyway.</summary>
+    private static void RevealInExplorer(string path)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo("explorer.exe", $"/select,\"{path}\"") { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Showing the converted file in Explorer");
         }
     }
 

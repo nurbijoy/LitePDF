@@ -429,16 +429,16 @@
                     </DockPanel>
                 </Border>
 
-                <!-- OCR progress -->
+                <!-- Long-running task progress (recognition, conversion) -->
                 <Border Style="{StaticResource Card}" VerticalAlignment="Bottom" HorizontalAlignment="Right" Margin="0,0,30,24" Width="310" Padding="16,12"
-                        Visibility="{Binding IsOcrRunning, Converter={StaticResource BoolToVisibility}}">
+                        Visibility="{Binding IsTaskRunning, Converter={StaticResource BoolToVisibility}}">
                     <StackPanel>
                         <DockPanel>
-                            <Button DockPanel.Dock="Right" Content="Cancel" Click="CancelOcr_Click" Padding="12,2" MinHeight="28"/>
-                            <TextBlock Text="Recognizing text" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            <Button DockPanel.Dock="Right" Content="Cancel" Click="CancelTask_Click" Padding="12,2" MinHeight="28"/>
+                            <TextBlock Text="{Binding TaskTitle}" FontWeight="SemiBold" VerticalAlignment="Center"/>
                         </DockPanel>
-                        <TextBlock Text="{Binding OcrProgressText}" Style="{StaticResource Caption}" Margin="0,6,0,10"/>
-                        <ProgressBar Maximum="1" Value="{Binding OcrProgress}"/>
+                        <TextBlock Text="{Binding TaskProgressText}" Style="{StaticResource Caption}" Margin="0,6,0,10"/>
+                        <ProgressBar Maximum="1" Value="{Binding TaskProgress}"/>
                     </StackPanel>
                 </Border>
 

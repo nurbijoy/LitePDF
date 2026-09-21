@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using LitePdf.Core;
+using LitePdf.Core.Export;
 using LitePdf.Core.Text;
 using LitePdf.Pdfium.Interop;
 using static LitePdf.Pdfium.Interop.NativeMethods;
@@ -11,7 +12,7 @@ namespace LitePdf.Pdfium;
 /// A PDF opened with PDFium. All native work is marshalled to <see cref="PdfiumWorker"/>; handles never leave it.
 /// Geometry crossing this class's boundary is in normalized page coordinates.
 /// </summary>
-public sealed unsafe class PdfiumDocument : IPdfDocument
+public sealed unsafe partial class PdfiumDocument : IPdfDocument, IPageContentSource
 {
     private const int MaxOutlineItems = 20_000;
     private const int MaxOutlineDepth = 64;

@@ -12,7 +12,7 @@ namespace LitePdf.App;
 
 public partial class MainWindow
 {
-    private CancellationTokenSource? _ocrCts;
+    private CancellationTokenSource? _taskCts;
     private bool _bannerDismissed;
     private int _bannerVersion;
 
@@ -185,14 +185,14 @@ public partial class MainWindow
         int page = Viewer.CurrentPageIndex;
         int version = ++_bannerVersion;
         UpdateTextSource();
-        if (session is null || _bannerDismissed || _vm.IsOcrRunning)
+        if (session is null || _bannerDismissed || _vm.IsTaskRunning)
         {
             _vm.IsScanBannerVisible = false;
             return;
         }
         bool needsOcr = await session.NeedsOcrAsync(page);
         if (version != _bannerVersion || !ReferenceEquals(session, _session)) return;
-        _vm.IsScanBannerVisible = needsOcr && !_bannerDismissed && !_vm.IsOcrRunning;
+        _vm.IsScanBannerVisible = needsOcr && !_bannerDismissed && !_vm.IsTaskRunning;
         UpdateTextSource();
     }
 
@@ -218,7 +218,7 @@ public partial class MainWindow
         _vm.IsScanBannerVisible = false;
     }
 
-    private void CancelOcr_Click(object sender, RoutedEventArgs e) => _ocrCts?.Cancel();
+    private void CancelTask_Click(object sender, RoutedEventArgs e) => _taskCts?.Cancel();
 
     private bool EnsureOcrAvailable()
     {
@@ -233,7 +233,7 @@ public partial class MainWindow
     private async Task RecognizePagesAsync(IReadOnlyList<int>? pages)
     {
         if (_session is not { } session || !EnsureOcrAvailable()) return;
-        if (_vm.IsOcrRunning)
+        if (_vm.IsTaskRunning)
         {
             ShowToast("Text recognition is already running");
             return;
@@ -249,20 +249,21 @@ public partial class MainWindow
             }
         }
 
-        var cts = _ocrCts = new CancellationTokenSource();
+        var cts = _taskCts = new CancellationTokenSource();
         var candidates = pages ?? Enumerable.Range(0, session.PageCount).ToList();
         int recognized = 0;
-        _vm.IsOcrRunning = true;
+        _vm.TaskTitle = "Recognizing text";
+        _vm.IsTaskRunning = true;
         _vm.IsScanBannerVisible = false;
-        _vm.OcrProgress = 0;
+        _vm.TaskProgress = 0;
         try
         {
             for (int i = 0; i < candidates.Count; i++)
             {
                 cts.Token.ThrowIfCancellationRequested();
                 int page = candidates[i];
-                _vm.OcrProgressText = candidates.Count == 1 ? $"Page {page + 1}" : $"Page {page + 1} · {i + 1} of {candidates.Count}";
-                _vm.OcrProgress = (double)i / candidates.Count;
+                _vm.TaskProgressText = candidates.Count == 1 ? $"Page {page + 1}" : $"Page {page + 1} · {i + 1} of {candidates.Count}";
+                _vm.TaskProgress = (double)i / candidates.Count;
 
                 if (pages is null && (session.HasOcrText(page) || !await session.NeedsOcrAsync(page, cts.Token))) continue;
                 await session.RecognizePageAsync(page, pages is null ? RenderPriority.Background : RenderPriority.Interactive, cts.Token);
@@ -270,7 +271,7 @@ public partial class MainWindow
                 session.NotifyTextChanged(page);
                 recognized++;
             }
-            _vm.OcrProgress = 1;
+            _vm.TaskProgress = 1;
             ShowToast(recognized switch
             {
                 0 when pages is null => "Every page already has selectable text",
@@ -288,8 +289,8 @@ public partial class MainWindow
         }
         finally
         {
-            if (ReferenceEquals(_ocrCts, cts)) _ocrCts = null;
-            _vm.IsOcrRunning = false;
+            if (ReferenceEquals(_taskCts, cts)) _taskCts = null;
+            _vm.IsTaskRunning = false;
             Run(UpdateScanBannerAsync);
         }
     }

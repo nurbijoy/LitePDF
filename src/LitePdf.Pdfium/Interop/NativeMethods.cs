@@ -22,6 +22,25 @@ internal struct FS_QUADPOINTSF
     public float X1, Y1, X2, Y2, X3, Y3, X4, Y4;
 }
 
+/// <summary>PDF transformation matrix [a b c d e f].</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct FS_MATRIX
+{
+    public float A, B, C, D, E, F;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct FPDF_IMAGEOBJ_METADATA
+{
+    public uint Width;
+    public uint Height;
+    public float HorizontalDpi;
+    public float VerticalDpi;
+    public uint BitsPerPixel;
+    public int Colorspace;
+    public int MarkedContentId;
+}
+
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct FPDF_FILEACCESS
 {
@@ -50,9 +69,27 @@ internal static unsafe partial class NativeMethods
     public const uint PDFACTION_GOTO = 1;
     public const uint PDFACTION_URI = 3;
 
+    public const int FPDF_PAGEOBJ_TEXT = 1;
     public const int FPDF_PAGEOBJ_PATH = 2;
     public const int FPDF_PAGEOBJ_IMAGE = 3;
+    public const int FPDF_PAGEOBJ_SHADING = 4;
     public const int FPDF_PAGEOBJ_FORM = 5;
+
+    /// <summary>Text drawn with render mode 3 is invisible: the OCR layer under a scanned page.</summary>
+    public const int FPDF_TEXTRENDERMODE_INVISIBLE = 3;
+
+    // PDF font descriptor /Flags bits (PDF 32000-1 table 123).
+    public const int FPDF_FONTFLAG_FIXEDPITCH = 1 << 0;
+    public const int FPDF_FONTFLAG_SERIF = 1 << 1;
+    public const int FPDF_FONTFLAG_ITALIC = 1 << 6;
+    public const int FPDF_FONTFLAG_FORCEBOLD = 1 << 18;
+
+    public const int FPDFBitmap_Gray = 1;
+    public const int FPDFBitmap_BGR = 2;
+    public const int FPDFBitmap_BGRx = 3;
+    public const int FPDFBitmap_BGRA = 4;
+
+    public const int FPDF_FILLMODE_NONE = 0;
 
     public const int FPDF_ANNOT_TEXT = 1;
     public const int FPDF_ANNOT_LINK = 2;
@@ -110,6 +147,49 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Lib)] public static partial int FPDFText_IsGenerated(nint textPage, int index);
     [LibraryImport(Lib)] public static partial int FPDFText_GetLooseCharBox(nint textPage, int index, FS_RECTF* rect);
     [LibraryImport(Lib)] public static partial int FPDFText_GetCharBox(nint textPage, int index, double* left, double* right, double* bottom, double* top);
+
+    // Text appearance (fpdf_text.h, fpdf_edit.h). Used by the DOCX export to recover character styling.
+    [LibraryImport(Lib)] public static partial double FPDFText_GetFontSize(nint textPage, int index);
+    [LibraryImport(Lib)] public static partial uint FPDFText_GetFontInfo(nint textPage, int index, byte* buffer, uint bufLen, int* flags);
+    [LibraryImport(Lib)] public static partial int FPDFText_GetFontWeight(nint textPage, int index);
+    [LibraryImport(Lib)] public static partial int FPDFText_GetFillColor(nint textPage, int index, uint* r, uint* g, uint* b, uint* a);
+    [LibraryImport(Lib)] public static partial float FPDFText_GetCharAngle(nint textPage, int index);
+    [LibraryImport(Lib)] public static partial nint FPDFText_GetTextObject(nint textPage, int index);
+    [LibraryImport(Lib)] public static partial int FPDFText_GetMatrix(nint textPage, int index, FS_MATRIX* matrix);
+    [LibraryImport(Lib)] public static partial nint FPDFTextObj_GetFont(nint textObject);
+    [LibraryImport(Lib)] public static partial int FPDFTextObj_GetTextRenderMode(nint textObject);
+    [LibraryImport(Lib)] public static partial int FPDFFont_GetFlags(nint font);
+    [LibraryImport(Lib)] public static partial int FPDFFont_GetWeight(nint font);
+    [LibraryImport(Lib)] public static partial int FPDFFont_GetItalicAngle(nint font, int* angle);
+    [LibraryImport(Lib)] public static partial uint FPDFFont_GetBaseFontName(nint font, byte* buffer, uint length);
+    [LibraryImport(Lib)] public static partial uint FPDFFont_GetFamilyName(nint font, byte* buffer, uint length);
+
+    // Page objects (fpdf_edit.h)
+    [LibraryImport(Lib)] public static partial int FPDFPageObj_GetBounds(nint pageObject, float* left, float* bottom, float* right, float* top);
+    [LibraryImport(Lib)] public static partial int FPDFPageObj_GetMatrix(nint pageObject, FS_MATRIX* matrix);
+    [LibraryImport(Lib)] public static partial int FPDFPageObj_SetIsActive(nint pageObject, int active);
+    [LibraryImport(Lib)] public static partial int FPDFPageObj_GetStrokeWidth(nint pageObject, float* width);
+
+    // Images (fpdf_edit.h)
+    [LibraryImport(Lib)] public static partial int FPDFImageObj_GetImageFilterCount(nint imageObject);
+    [LibraryImport(Lib)] public static partial uint FPDFImageObj_GetImageFilter(nint imageObject, int index, byte* buffer, uint bufLen);
+    [LibraryImport(Lib)] public static partial uint FPDFImageObj_GetImageDataDecoded(nint imageObject, byte* buffer, uint bufLen);
+    [LibraryImport(Lib)] public static partial int FPDFImageObj_GetImagePixelSize(nint imageObject, uint* width, uint* height);
+    [LibraryImport(Lib)] public static partial int FPDFImageObj_GetImageMetadata(nint imageObject, nint page, FPDF_IMAGEOBJ_METADATA* metadata);
+    [LibraryImport(Lib)] public static partial nint FPDFImageObj_GetRenderedBitmap(nint document, nint page, nint imageObject);
+
+    // Paths (fpdf_edit.h)
+    [LibraryImport(Lib)] public static partial int FPDFPath_CountSegments(nint path);
+    [LibraryImport(Lib)] public static partial nint FPDFPath_GetPathSegment(nint path, int index);
+    [LibraryImport(Lib)] public static partial int FPDFPathSegment_GetPoint(nint segment, float* x, float* y);
+    [LibraryImport(Lib)] public static partial int FPDFPathSegment_GetType(nint segment);
+    [LibraryImport(Lib)] public static partial int FPDFPath_GetDrawMode(nint path, int* fillMode, int* stroke);
+
+    // Bitmaps produced by PDFium itself (FPDFImageObj_GetRenderedBitmap) carry their own size and format.
+    [LibraryImport(Lib)] public static partial int FPDFBitmap_GetWidth(nint bitmap);
+    [LibraryImport(Lib)] public static partial int FPDFBitmap_GetHeight(nint bitmap);
+    [LibraryImport(Lib)] public static partial int FPDFBitmap_GetFormat(nint bitmap);
+    [LibraryImport(Lib)] public static partial void FPDF_RenderPageBitmapWithMatrix(nint bitmap, nint page, FS_MATRIX* matrix, FS_RECTF* clipping, int flags);
 
     // Outline, destinations, actions
     [LibraryImport(Lib)] public static partial nint FPDFBookmark_GetFirstChild(nint document, nint bookmark);

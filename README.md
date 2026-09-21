@@ -32,6 +32,11 @@ The app is not code-signed, so Windows SmartScreen may warn on first run.
 - **Annotations:**
   - Highlight (5 colors), underline, strikethrough and sticky notes, saved as standard PDF annotations
   - Annotation list with Markdown export
+- **Convert to Word**
+  - Creates an editable `.docx`: real paragraphs that reflow, character styling, pictures, lists, ruled
+    tables, headings, headers and footers with a live page number, and links
+  - Scanned pages can be recognized first, so they convert to text rather than a picture
+  - Choose the page range and what to keep; nothing leaves the device
 - **Other:** print, read aloud, document properties.
 
 ## Keyboard

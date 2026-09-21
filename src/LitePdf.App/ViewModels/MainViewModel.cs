@@ -41,9 +41,10 @@ public sealed class MainViewModel : ObservableObject
     private double _searchProgress;
     private string _annotationsStatus = "";
     private bool _isScanBannerVisible;
-    private bool _isOcrRunning;
-    private double _ocrProgress;
-    private string _ocrProgressText = "";
+    private bool _isTaskRunning;
+    private double _taskProgress;
+    private string _taskProgressText = "";
+    private string _taskTitle = "Recognizing text";
     private string _statusText = "";
     private string _toastText = "";
     private bool _isToastVisible;
@@ -211,11 +212,14 @@ public sealed class MainViewModel : ObservableObject
 
     public bool IsScanBannerVisible { get => _isScanBannerVisible; set => Set(ref _isScanBannerVisible, value); }
 
-    public bool IsOcrRunning { get => _isOcrRunning; set => Set(ref _isOcrRunning, value); }
+    public bool IsTaskRunning { get => _isTaskRunning; set => Set(ref _isTaskRunning, value); }
 
-    public double OcrProgress { get => _ocrProgress; set => Set(ref _ocrProgress, value); }
+    public double TaskProgress { get => _taskProgress; set => Set(ref _taskProgress, value); }
 
-    public string OcrProgressText { get => _ocrProgressText; set => Set(ref _ocrProgressText, value); }
+    public string TaskProgressText { get => _taskProgressText; set => Set(ref _taskProgressText, value); }
+
+    /// <summary>Heading of the progress card: what the long-running job actually is.</summary>
+    public string TaskTitle { get => _taskTitle; set => Set(ref _taskTitle, value); }
 
     public string StatusText { get => _statusText; set => Set(ref _statusText, value); }
 

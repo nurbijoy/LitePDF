@@ -425,5 +425,6 @@ internal static class MessageDialogProbe
         new PropertiesDialog(null, new DocumentInfo("C:\\a.pdf", 1234, 3, "1.7", true, "T", "A", "S", "K", "C", "P", DateTimeOffset.Now, DateTimeOffset.Now), new PageSize(612, 792)).Close();
         new SettingsDialog(null, new AppSettings(), ["en-US"], () => { }).Close();
         new PrintDialogWindow(null, null, 0, "Test").Close();
+        new ExportDocxDialog(null, 12, 0, canRecognize: true).Close();
     }
 }
