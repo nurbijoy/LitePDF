@@ -50,6 +50,9 @@ public sealed record PdfAnnotation(
     AnnotationColor? Color,
     string Contents)
 {
+    /// <summary>The annotation's /T, which is who wrote it. Empty when the PDF does not say.</summary>
+    public string Author { get; init; } = string.Empty;
+
     public bool IsMarkup => Kind is AnnotationKind.Highlight or AnnotationKind.Underline or AnnotationKind.StrikeOut or AnnotationKind.Squiggly;
 
     /// <summary>True for annotation types LitePDF lets the user select, recolor and delete.</summary>

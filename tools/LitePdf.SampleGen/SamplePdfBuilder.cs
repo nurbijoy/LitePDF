@@ -303,6 +303,224 @@ public static class SampleDocuments
             c.Append($"{F(x)} {F(y)} {F(w)} {F(h)} re f\n");
     }
 
+    /// <summary>
+    /// A tagged one-page document: a structure tree with a heading, a paragraph, a two-item list, a
+    /// three-column table that draws no lines at all, and a figure with alt text. Everything the tagged
+    /// path of the Word export reads is stated here rather than left to be inferred.
+    /// </summary>
+    public static byte[] CreateTaggedDocument(byte[] pictureRgb, int pictureWidth, int pictureHeight)
+    {
+        var b = new SamplePdfBuilder();
+        int catalog = b.Reserve(), pages = b.Reserve(), page = b.Reserve(), structRoot = b.Reserve();
+        int roman = b.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Times-Roman /Encoding /WinAnsiEncoding >>");
+        int bold = b.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Times-Bold /Encoding /WinAnsiEncoding >>");
+        int picture = b.AddStream(
+            $"/Type /XObject /Subtype /Image /Width {pictureWidth} /Height {pictureHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8",
+            pictureRgb);
+
+        var c = new StringBuilder();
+        int mcid = 0;
+
+        void Marked(string tag, string body)
+        {
+            c.Append($"/{tag} << /MCID {mcid++} >> BDC\n{body}EMC\n");
+        }
+
+        static string Show(string font, double size, double x, double y, string text) =>
+            $"BT /{font} {F(size)} Tf {F(x)} {F(y)} Td ({Escape(text)}) Tj ET\n";
+
+        Marked("H1", Show("F2", 20, 72, 720, "A Tagged Document"));
+        Marked("P", Show("F1", 11, 72, 690, "This paragraph is marked as a paragraph, so nothing about it has to be guessed at.") +
+                    Show("F1", 11, 72, 675, "Its second line is part of the same structure element."));
+
+        Marked("Lbl", Show("F1", 11, 90, 645, "·"));
+        Marked("LBody", Show("F1", 11, 108, 645, "The first item of a tagged list"));
+        Marked("Lbl", Show("F1", 11, 90, 627, "·"));
+        Marked("LBody", Show("F1", 11, 108, 627, "The second item of the same list"));
+
+        string[,] cells =
+        {
+            { "Region", "Orders", "Change" },
+            { "North", "1,204", "+3%" },
+            { "South", "987", "-1%" },
+        };
+        double[] columns = [72, 260, 420];
+        var cellIds = new int[3, 3];
+        for (int r = 0; r < 3; r++)
+        {
+            for (int col = 0; col < 3; col++)
+            {
+                cellIds[r, col] = mcid;
+                Marked(r == 0 ? "TH" : "TD", Show(r == 0 ? "F2" : "F1", 11, columns[col], 580 - r * 20, cells[r, col]));
+            }
+        }
+
+        int figureId = mcid;
+        Marked("Figure", $"q 240 0 0 180 72 {F(340)} cm /Im1 Do Q\n");
+
+        int content = b.AddStream("", Encoding.Latin1.GetBytes(c.ToString()));
+        b.Set(page, $"<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 612 792] /Contents {content} 0 R " +
+                    $"/StructParents 0 /Resources << /Font << /F1 {roman} 0 R /F2 {bold} 0 R >> " +
+                    $"/XObject << /Im1 {picture} 0 R >> >> >>");
+
+        // The structure tree. /Pg on every element ties it to the page, and /K is the marked-content id
+        // the page drew it with, which is what PDFium hands back through FPDF_StructElement_*.
+        int document = b.Reserve();
+
+        // A reader finds a page's structure through the parent tree, entry by marked-content id — not by
+        // walking /K from the root — so every id the page drew has to name its element here.
+        var owners = new int[mcid];
+
+        int Element(string type, int parent, int content, string extra = "")
+        {
+            int id = b.Add($"<< /Type /StructElem /S /{type} /P {parent} 0 R /Pg {page} 0 R /K {content}{extra} >>");
+            owners[content] = id;
+            return id;
+        }
+
+        int heading = Element("H1", document, 0);
+        int paragraph = Element("P", document, 1);
+
+        int list = b.Reserve();
+        int item1 = b.Reserve(), item2 = b.Reserve();
+        b.Set(item1, $"<< /Type /StructElem /S /LI /P {list} 0 R /Pg {page} 0 R /K [" +
+                     $"{Element("Lbl", item1, 2)} 0 R {Element("LBody", item1, 3)} 0 R] >>");
+        b.Set(item2, $"<< /Type /StructElem /S /LI /P {list} 0 R /Pg {page} 0 R /K [" +
+                     $"{Element("Lbl", item2, 4)} 0 R {Element("LBody", item2, 5)} 0 R] >>");
+        b.Set(list, $"<< /Type /StructElem /S /L /P {document} 0 R /Pg {page} 0 R /K [{item1} 0 R {item2} 0 R] >>");
+
+        int table = b.Reserve();
+        var rowIds = new int[3];
+        for (int r = 0; r < 3; r++)
+        {
+            int row = b.Reserve();
+            var ids = new List<string>();
+            for (int col = 0; col < 3; col++)
+                ids.Add($"{Element(r == 0 ? "TH" : "TD", row, cellIds[r, col])} 0 R");
+            b.Set(row, $"<< /Type /StructElem /S /TR /P {table} 0 R /Pg {page} 0 R /K [{string.Join(' ', ids)}] >>");
+            rowIds[r] = row;
+        }
+        b.Set(table, $"<< /Type /StructElem /S /Table /P {document} 0 R /Pg {page} 0 R " +
+                     $"/K [{string.Join(' ', rowIds.Select(id => $"{id} 0 R"))}] >>");
+
+        int figure = Element("Figure", document, figureId, " /Alt (A plate of graded colour)");
+
+        b.Set(document, $"<< /Type /StructElem /S /Document /P {structRoot} 0 R /K [" +
+                        $"{heading} 0 R {paragraph} 0 R {list} 0 R {table} 0 R {figure} 0 R] >>");
+        b.Set(structRoot, $"<< /Type /StructTreeRoot /K [{document} 0 R] " +
+                          $"/ParentTree << /Nums [0 [{string.Join(' ', owners.Select(id => $"{id} 0 R"))}]] >> " +
+                          "/ParentTreeNextKey 1 >>");
+
+        b.Set(pages, $"<< /Type /Pages /Kids [{page} 0 R] /Count 1 >>");
+        b.Set(catalog, $"<< /Type /Catalog /Pages {pages} 0 R /StructTreeRoot {structRoot} 0 R " +
+                       "/MarkInfo << /Marked true >> >>");
+        int info = b.Add("<< /Title (A Tagged Document) /Author (LitePDF tests) >>");
+        return b.Build(catalog, info);
+
+        static string F(double v) => SamplePdfBuilder.F(v);
+        static string Escape(string s) => SamplePdfBuilder.Escape(s);
+    }
+
+    /// <summary>
+    /// A two-page document of everything the export used to drop: a bar chart drawn with path operators, a
+    /// table shaded behind its header row, a table that draws no lines, a picture inside a form XObject,
+    /// and a sticky note.
+    /// </summary>
+    public static byte[] CreateDrawingDocument(byte[] pictureRgb, int pictureWidth, int pictureHeight)
+    {
+        var b = new SamplePdfBuilder();
+        int catalog = b.Reserve(), pages = b.Reserve();
+        int first = b.Reserve(), second = b.Reserve();
+        int roman = b.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>");
+        int bold = b.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
+
+        int picture = b.AddStream(
+            $"/Type /XObject /Subtype /Image /Width {pictureWidth} /Height {pictureHeight} /ColorSpace /DeviceRGB /BitsPerComponent 8",
+            pictureRgb);
+        int form = b.AddStream(
+            $"/Type /XObject /Subtype /Form /BBox [0 0 100 75] /Matrix [1 0 0 1 0 0] " +
+            $"/Resources << /XObject << /Im1 {picture} 0 R >> >>",
+            Encoding.Latin1.GetBytes("q 100 0 0 75 0 0 cm /Im1 Do Q"));
+
+        // Page 1: a chart no image object holds — filled bars, an axis, and a curve.
+        var one = new StringBuilder();
+        Text(one, "F2", 18, 72, 720, "Drawings and Tables");
+        Text(one, "F1", 11, 72, 690, "The chart below is drawn with path operators, not stored as a picture.");
+
+        double[] heights = [60, 110, 85, 140, 100];
+        for (int i = 0; i < heights.Length; i++)
+        {
+            double x = 96 + i * 60;
+            one.Append($"{F(0.15 + i * 0.15)} 0.35 0.75 rg\n");
+            one.Append($"{F(x)} 460 36 {F(heights[i])} re f\n");
+        }
+        one.Append("0 0 0 RG 1.2 w\n72 458 m 420 458 l S\n72 458 m 72 620 l S\n");
+        one.Append("0.8 0.2 0.2 RG 2 w\n96 520 m 180 600 280 480 400 580 c S\n");
+        Text(one, "F1", 9, 72, 440, "Figure 1. Orders by quarter.");
+
+        int contentOne = b.AddStream("", Encoding.Latin1.GetBytes(one.ToString()));
+        b.Set(first, $"<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 612 792] /Contents {contentOne} 0 R " +
+                     $"/Resources << /Font << /F1 {roman} 0 R /F2 {bold} 0 R >> >> >>");
+
+        // Page 2: a shaded ruled table, a table with no lines at all, and a picture inside a form.
+        var two = new StringBuilder();
+        Text(two, "F2", 14, 72, 720, "Two kinds of table");
+
+        double[] columns = [72, 240, 400, 520];
+        double top = 690, rowHeight = 24;
+        double[] rows = [top, top - rowHeight, top - rowHeight * 2, top - rowHeight * 3];
+
+        // The header row is shaded: a filled rectangle behind the words, which is not a drawing.
+        two.Append($"0.85 0.87 0.92 rg\n{F(columns[0])} {F(rows[1])} {F(columns[^1] - columns[0])} {F(rowHeight)} re f\n");
+        two.Append("0 0 0 RG 0.8 w\n");
+        foreach (double line in rows) two.Append($"{F(columns[0])} {F(line)} m {F(columns[^1])} {F(line)} l S\n");
+        foreach (double column in columns) two.Append($"{F(column)} {F(rows[^1])} m {F(column)} {F(rows[0])} l S\n");
+
+        string[,] ruled =
+        {
+            { "Quarter", "Orders", "Change" },
+            { "Q1", "1,204", "+3%" },
+            { "Q2", "987", "-1%" },
+        };
+        for (int r = 0; r < 3; r++)
+            for (int col = 0; col < 3; col++)
+                Text(two, r == 0 ? "F2" : "F1", 11, columns[col] + 6, rows[r] - 16, ruled[r, col]);
+
+        Text(two, "F1", 11, 72, rows[^1] - 34, "And the same figures with no lines drawn at all:");
+
+        string[,] unruled =
+        {
+            { "Quarter", "Orders", "Change" },
+            { "Q3", "1,442", "+8%" },
+            { "Q4", "1,610", "+12%" },
+            { "Year", "5,243", "+6%" },
+        };
+        double plainTop = rows[^1] - 64;
+        for (int r = 0; r < 4; r++)
+            for (int col = 0; col < 3; col++)
+                Text(two, r == 0 ? "F2" : "F1", 11, columns[col], plainTop - r * 18, unruled[r, col]);
+
+        two.Append($"q 2.4 0 0 2.4 72 {F(plainTop - 250)} cm /Fm1 Do Q\n");
+        Text(two, "F1", 9, 72, plainTop - 266, "Figure 2. A picture drawn through a form XObject.");
+
+        int contentTwo = b.AddStream("", Encoding.Latin1.GetBytes(two.ToString()));
+        int note = b.Add("<< /Type /Annot /Subtype /Text /Name /Comment /F 4 /Rect [540 600 560 620] " +
+                         "/Contents (The figures for Q2 need a citation.) /T (Reviewer) >>");
+        b.Set(second, $"<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 612 792] /Contents {contentTwo} 0 R " +
+                      $"/Annots [{note} 0 R] " +
+                      $"/Resources << /Font << /F1 {roman} 0 R /F2 {bold} 0 R >> /XObject << /Fm1 {form} 0 R >> >> >>");
+
+        b.Set(pages, $"<< /Type /Pages /Kids [{first} 0 R {second} 0 R] /Count 2 >>");
+        b.Set(catalog, $"<< /Type /Catalog /Pages {pages} 0 R >>");
+        int info = b.Add("<< /Title (Drawings and Tables) /Author (LitePDF tests) >>");
+        return b.Build(catalog, info);
+
+        static string F(double v) => SamplePdfBuilder.F(v);
+
+        static void Text(StringBuilder c, string font, double size, double x, double y, string text) =>
+            c.Append($"BT /{font} {F(size)} Tf {F(x)} {F(y)} Td ({SamplePdfBuilder.Escape(text)}) Tj ET\n");
+    }
+
     /// <summary>Body text of uneven line lengths, so paragraph ends are visible in the geometry.</summary>
     private static readonly string[] Wrapped =
     [

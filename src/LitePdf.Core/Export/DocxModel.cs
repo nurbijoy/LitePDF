@@ -75,6 +75,9 @@ public sealed record DocxParagraph(IReadOnlyList<DocxRun> Runs) : DocxBlock
     /// <summary>Starts a new page before this paragraph.</summary>
     public bool PageBreakBefore { get; init; }
 
+    /// <summary>Ids of the comments anchored to this paragraph; see <see cref="DocxComment"/>.</summary>
+    public IReadOnlyList<int> CommentIds { get; init; } = [];
+
     public string Text => Runs.Count == 1 ? Runs[0].Text : string.Concat(Runs.Select(r => r.Text));
 
     public static DocxParagraph Empty { get; } = new([]);
@@ -108,6 +111,18 @@ public sealed record DocxRow(IReadOnlyList<DocxCell> Cells)
 public sealed record DocxTable(IReadOnlyList<DocxRow> Rows, IReadOnlyList<int> ColumnWidthsTwips) : DocxBlock
 {
     public bool HasBorders { get; init; } = true;
+}
+
+/// <summary>
+/// A margin note. A PDF sticky note is a comment in everything but name, and Word has a place to put it;
+/// left in the body it would interrupt the text, and dropped it would be content lost without a word.
+/// </summary>
+public sealed record DocxComment(int Id, string Author, string Text)
+{
+    public DateTimeOffset? Date { get; init; }
+
+    /// <summary>What Word shows in the margin bubble; derived from the author when not given.</summary>
+    public string Initials { get; init; } = string.Empty;
 }
 
 /// <summary>Page margins in points.</summary>
@@ -147,6 +162,12 @@ public sealed record DocxDocument(IReadOnlyList<DocxSection> Sections)
     public double BodySizePoints { get; init; } = 11;
 
     public string BodyFont { get; init; } = "Calibri";
+
+    /// <summary>Comments referenced by <see cref="DocxParagraph.CommentIds"/>.</summary>
+    public IReadOnlyList<DocxComment> Comments { get; init; } = [];
+
+    /// <summary>Font programs to embed. Empty unless the export asked for it.</summary>
+    public IReadOnlyList<EmbeddedFont> Fonts { get; init; } = [];
 
     public IEnumerable<DocxBlock> AllBlocks => Sections.SelectMany(s => s.Blocks);
 }

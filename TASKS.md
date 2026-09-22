@@ -1,5 +1,70 @@
 # TASKS
 
+## Convert to Word (.docx), the rest of it (2026-09-22, T-F7)
+Everything the first pass left on the floor: vector artwork, pictures inside form XObjects, the colour behind
+a table cell, tables that draw no lines, tagged PDFs, sticky notes, and optional font embedding.
+
+- **Vector artwork (`PdfContentReader`).** Paths are sorted into three kinds — a hairline is a table rule, an
+  axis-aligned filled rectangle is a panel, everything else is artwork — and the artwork is clustered into
+  regions and rasterized at 300 DPI onto a transparent bitmap with the text and image objects switched off
+  (`FPDFPageObj_SetIsActive`), so a chart arrives as one PNG and its labels stay editable text. The rules
+  inside a region go with it, so a chart keeps its axes. A region that is pale, page-sized, or has the body
+  text inside it is a background and is left alone.
+- **Form XObjects.** Objects are walked with a matrix stack, because a nested object's bounds are in the
+  form's space. Pictures placed through a form are now found and placed correctly; paths inside one are found
+  too, so a table drawn inside a form is rebuilt like any other.
+- **Rules drawn as strokes.** A hairline box of no width used to be discarded as empty, which lost every
+  table that draws its grid with `m`/`l`/`S` rather than filled rectangles. They are now kept.
+- **Cell shading.** The smallest filled rectangle covering a cell becomes `w:shd`, so a shaded header row
+  (one wide rectangle behind three cells) carries over while a panel behind the whole table does not.
+- **Tagged PDFs (`TagIndex`).** `FPDF_StructTree_*` and `FPDFPageObj_GetMarkedContentID` give the structure
+  tree and tie it to the characters. Heading levels, list items and their nesting, captions, figure alt text
+  and tables come from the tags, and two blocks the geometry split that are one tagged element become one
+  paragraph again. Appearance is never taken from the tags. No second front end: see `docs/DOCX-EXPORT.md`
+  §2 for why.
+- **Tagged tables.** `/Table`, `/TR`, `/TD`, `/TH` with `/ColSpan` and `/RowSpan`, laid out the way a browser
+  lays out a table, with column widths from where the cells start and borders only where the PDF drew them.
+- **Tables with no lines (`UnruledTableBuilder`, opt-in).** Three or more consecutive lines cut into the same
+  number of pieces by gaps several characters wide, aligned on one edge down the whole run, no piece long
+  enough to be a sentence. Off by default, because a false positive turns readable prose into a mangled grid.
+- **Sticky notes become Word comments.** `word/comments.xml`, a comment range on the nearest paragraph, and
+  the author from the annotation's `/T`. A highlight that carries a note of its own gets both.
+- **Font embedding (opt-in).** `FPDFFont_GetFontData` for sfnt fonts only, written to `word/fonts/*.odttf`
+  obfuscated against the GUID in `w:fontKey`, with `word/fontTable.xml` naming each family and style. Every
+  font is declared `w:subsetted`, because PDFium returns the base name with the subset tag already stripped
+  and nearly all embedded PDF fonts are subsets.
+- **App.** Three more choices in the dialog under "Rebuilding the layout" (use the document's tags, rebuild
+  tables with no lines, embed fonts) and a "Drawings" checkbox beside "Pictures"; the dialog body scrolls, so
+  the dialog is capped to the work area and its body scrolls, so the buttons cannot end up off the screen.
+  The costly reads (drawings, tags and fonts) are only done when the options ask for them, and pages that
+  draw the same picture share one copy of it while the document is being read.
+
+**Verification performed:**
+- Build: 0 errors, 0 warnings. 209 automated tests pass (44 new). `--self-test` passes.
+- Two new fixtures from `tools/LitePdf.SampleGen`: `sample-tagged.pdf` (structure tree, tagged list, tagged
+  table that draws no lines, figure with alt text) and `sample-drawings.pdf` (bar chart drawn with path
+  operators, table ruled with stroked lines and a shaded header, table with no lines, picture inside a form
+  XObject, sticky note). Character conservation is asserted end to end on both.
+- That the text really is switched off while a drawing is rasterized is asserted on pixels: a pale triangle
+  with black type across it rasterizes to fewer than 200 dark pixels, and the words are still in the .docx.
+- Exercised by hand in the running app, both samples, and the .docx read back each time:
+  `sample-drawings.pdf` with "Also rebuild tables that draw no lines" ticked gives both tables, the shaded
+  header row, the rasterized chart, the form-XObject picture and the reviewer's comment;
+  `sample-tagged.pdf` with the defaults gives the tagged table, the merged paragraph, both list items and
+  the figure's alt text. Clicking through it is also what caught the dialog growing taller than the screen,
+  which put the Convert button below the bottom of the display; the window is now capped to the work area.
+- 1,000-page document: 6.6 s in Debug, 3.9 s in Release (2.9 s of it reading pages).
+
+### Known limits
+- **Not opened in Word or LibreOffice on this machine** — neither is installed. Every part is asserted to
+  parse, every relationship to resolve and every extension to have a content type, but "Word opens it without
+  a repair prompt" has not been checked by hand for comments or embedded fonts.
+- **Reading order on a tagged page still comes from the geometry**, not from the tag order. They differ only
+  where a page is set unusually.
+- **Vector artwork is a picture, not shapes.** It cannot be edited in Word, only moved and resized.
+- **A drawing and the text over it both reach the .docx**, so a chart with labels inside it has those labels
+  twice: once in the picture's own artwork region if they were drawn as paths, once as text.
+
 ## Convert to Word (.docx) (2026-09-21, T-F6)
 Editable reflow conversion: a PDF becomes a Word document with real paragraphs, character styling, images,
 lists, tables, headers and footers. Design and reasoning in `docs/DOCX-EXPORT.md`; architecture summary in
@@ -37,17 +102,10 @@ is the whole writer.
 - 1000-page document converts in about 9.5 s (6 s of it reading pages).
 
 ### Known limits
-- **Tables without ruled lines are left as paragraphs.** Detecting them means deciding that two columns of
-  prose are a grid, and a false positive turns readable text into a mangled table. See `docs/DOCX-EXPORT.md`.
-- **Vector drawings are not yet carried over.** Paths are read only as table rules; charts and logos drawn
-  with path operators do not reach the .docx. Photographs and raster images do.
-- **Images inside form XObjects are skipped**, because a nested object's bounds are in the form's space.
-- **Fonts are referenced by name, not embedded.** A font that is not installed falls back to a similar one.
-- **Cell shading is not carried over** — the reader records rule geometry but not fill colour.
 - **Right-to-left and vertical text are untested.** Selection handles them; whether the composer's
   short-line and indent rules survive them is unknown.
-- Not yet exercised by hand in the running app: the menu item, dialog and progress card were verified by the
-  self-test and by driving the pipeline directly, not by clicking through them.
+- Tables without lines, vector drawings, form XObjects, cell shading, tagged PDFs and font embedding were all
+  limits of this pass and were finished in `T-F7` above.
 
 ## Multi-tab document support and single-instance IPC (2026-09-20, T-F1)
 - **Single-instance process management:** Added `SingleInstance` using session-scoped mutex (`Local\LitePDF-SingleInstance-{User}`) and asynchronous named pipe IPC (`LitePDF-IPC-{User}`). When opening additional documents from Explorer or command line, arguments are sent to the running instance and the new process exits with code 0.
@@ -161,21 +219,20 @@ Core, PDFium wrapper, OCR and the WPF app were rewritten. The previous implement
 | OCR one A4 scan at 400 DPI with layout analysis | ≈ 1.2 s | — |
 
 ## Next work (priority order)
-1. **T-V1** Manually verify the "not yet exercised" items above; add an encrypted sample to SampleGen (needs an RC4/AES writer or a checked-in small file).
+1. **T-V1** Open a converted .docx in Word and in LibreOffice on a machine that has them, including one with
+   comments and one with embedded fonts; add an encrypted sample to SampleGen (needs an RC4/AES writer or a
+   checked-in small file).
 2. **T-P1** Measure startup with the ReadyToRun publish; profile startup (PDFium init, WPF theme load, DocumentKey hashing).
 3. **T-P2** Pool render buffers (`ArrayPool`) to reduce LOH churn; consider rendering bitmaps straight into `WriteableBitmap`.
-4. **T-F7** Word export, remaining work: vector drawings (rasterize a figure region with the text objects
-   switched off), images inside form XObjects, cell shading, and unruled tables behind a toggle once real
-   files say the detector is safe. See the known limits above.
-5. **T-F2** Save as searchable PDF: embed OCR text as invisible text (`FPDFText_SetText`, render mode 3).
-6. **T-F3** Additional OCR languages beyond Windows' set (e.g. Bengali/Hindi) via an optional Tesseract `IOcrEngine`.
+4. **T-F2** Save as searchable PDF: embed OCR text as invisible text (`FPDFText_SetText`, render mode 3).
+5. **T-F3** Additional OCR languages beyond Windows' set (e.g. Bengali/Hindi) via an optional Tesseract `IOcrEngine`.
    The layout pass is engine-agnostic (it works from `OcrLine`/`OcrWord` boxes), so it would carry over unchanged.
-7. **T-F5** Radicals and nested fractions: `MathLayout` finds one bar at a time and has no notion of a root sign.
-8. **T-F4** Form filling (`FPDFDOC_InitFormFillEnvironment`), ink/freehand annotations.
-9. **T-A1** Accessibility pass with Narrator: page text exposure via UI Automation for the viewer, focus order, high contrast theme.
-10. **T-D2** Code-sign the installer so SmartScreen stops warning on first run (needs a certificate);
+6. **T-F5** Radicals and nested fractions: `MathLayout` finds one bar at a time and has no notion of a root sign.
+7. **T-F4** Form filling (`FPDFDOC_InitFormFillEnvironment`), ink/freehand annotations.
+8. **T-A1** Accessibility pass with Narrator: page text exposure via UI Automation for the viewer, focus order, high contrast theme.
+9. **T-D2** Code-sign the installer so SmartScreen stops warning on first run (needs a certificate);
     consider an MSIX/Store package and a winget manifest.
-11. **T-D3** Microsoft Store submission. Listing art is done (`assets/store/`, generated by
+10. **T-D3** Microsoft Store submission. Listing art is done (`assets/store/`, generated by
     `tools/make-logos.ps1`, which also emits the MSIX tile set T-D2 would need). Still missing:
     screenshots (one required, four or more recommended, 1366x768+), the listing text, an age
     rating questionnaire and a privacy policy URL — LitePDF collects nothing, but the Store

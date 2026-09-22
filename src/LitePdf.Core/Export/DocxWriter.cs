@@ -65,11 +65,21 @@ public static class DocxWriter
         foreach (var (path, header) in parts.HeaderParts)
             WritePart(zip, path, w => WriteHeaderFooter(w, header.Content, header.IsHeader));
 
+        if (parts.HasComments) WritePart(zip, "word/comments.xml", w => WriteComments(w, document));
+        if (parts.Fonts.Count > 0) WritePart(zip, "word/fontTable.xml", w => WriteFontTable(w, parts));
+
         foreach (var media in parts.Media)
         {
             var entry = zip.CreateEntry($"word/media/{media.FileName}", CompressionLevel.NoCompression);
             using var stream = entry.Open();
             stream.Write(media.Bytes);
+        }
+
+        foreach (var font in parts.Fonts)
+        {
+            var entry = zip.CreateEntry($"word/fonts/{font.FileName}", CompressionLevel.Optimal);
+            using var stream = entry.Open();
+            stream.Write(font.Obfuscated);
         }
     }
 
@@ -93,6 +103,10 @@ public static class DocxWriter
     private sealed record MediaPart(string FileName, byte[] Bytes, string RelationshipId, int Number);
 
     private sealed record HeaderPart(string RelationshipId, DocxHeaderFooter Content, bool IsHeader);
+
+    /// <summary>An embedded font: the obfuscated bytes, and the key Word needs to read them back.</summary>
+    private sealed record FontPart(
+        string FileName, byte[] Obfuscated, string RelationshipId, string Key, EmbeddedFont Font);
 
     /// <summary>
     /// One pass over the document to collect everything that needs a relationship id before any XML is
@@ -133,11 +147,33 @@ public static class DocxWriter
                 if (section.Footer is { } footer)
                     HeaderParts.Add(($"word/footer{++_footerCount}.xml", new HeaderPart(NextId(), footer, false)));
             }
+
+            HasComments = document.Comments.Count > 0;
+            if (HasComments) CommentsRelationshipId = NextId();
+
+            if (document.Fonts.Count > 0)
+            {
+                FontTableRelationshipId = NextId();
+                foreach (var font in document.Fonts)
+                {
+                    if (Fonts.Count >= 32 || font.Data.Length == 0) continue;
+                    string key = $"{{{Guid.NewGuid().ToString("D").ToUpperInvariant()}}}";
+                    Fonts.Add(new FontPart($"font{Fonts.Count + 1}.odttf", Obfuscate(font.Data, key), NextId(), key, font));
+                }
+            }
         }
 
         public List<MediaPart> Media { get; } = [];
 
         public List<(string Path, HeaderPart Part)> HeaderParts { get; } = [];
+
+        public List<FontPart> Fonts { get; } = [];
+
+        public bool HasComments { get; }
+
+        public string? CommentsRelationshipId { get; }
+
+        public string FontTableRelationshipId { get; } = string.Empty;
 
         public IReadOnlyDictionary<string, string> Hyperlinks => _hyperlinks;
 
@@ -187,6 +223,24 @@ public static class DocxWriter
             Media.Add(part);
         }
 
+        /// <summary>
+        /// Word stores an embedded font "obfuscated": the first 32 bytes are XORed with the 16 bytes of
+        /// the key in the part's own <c>w:fontKey</c>, taken in reverse order. It is not encryption — it
+        /// only stops the file being mistaken for an installable font — but a font stored plainly is a
+        /// font Word will not load.
+        /// </summary>
+        private static byte[] Obfuscate(byte[] font, string key)
+        {
+            var bytes = (byte[])font.Clone();
+            string hex = key.Trim('{', '}').Replace("-", "", StringComparison.Ordinal);
+            if (hex.Length != 32) return bytes;
+
+            var mask = new byte[16];
+            for (int i = 0; i < 16; i++) mask[i] = Convert.ToByte(hex.Substring(30 - i * 2, 2), 16);
+            for (int i = 0; i < Math.Min(32, bytes.Length); i++) bytes[i] ^= mask[i % 16];
+            return bytes;
+        }
+
         private static IEnumerable<DocxBlock> Flatten(IEnumerable<DocxBlock> blocks)
         {
             foreach (var block in blocks)
@@ -217,9 +271,16 @@ public static class DocxWriter
             });
         }
 
+        if (parts.Fonts.Count > 0)
+            Default("odttf", "application/vnd.openxmlformats-officedocument.obfuscatedFont");
+
         Override("/word/document.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml");
         Override("/word/styles.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml");
         Override("/word/numbering.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml");
+        if (parts.HasComments)
+            Override("/word/comments.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml");
+        if (parts.Fonts.Count > 0)
+            Override("/word/fontTable.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml");
         foreach (var (path, part) in parts.HeaderParts)
         {
             Override("/" + path, part.IsHeader
@@ -267,6 +328,14 @@ public static class DocxWriter
             Relationship(w, id, RNs + "/hyperlink", uri, external: true);
         foreach (var (path, part) in parts.HeaderParts)
             Relationship(w, part.RelationshipId, RNs + (part.IsHeader ? "/header" : "/footer"), Path.GetFileName(path));
+        if (parts.CommentsRelationshipId is { } comments)
+            Relationship(w, comments, RNs + "/comments", "comments.xml");
+        if (parts.Fonts.Count > 0)
+        {
+            Relationship(w, parts.FontTableRelationshipId, RNs + "/fontTable", "fontTable.xml");
+            foreach (var font in parts.Fonts)
+                Relationship(w, font.RelationshipId, RNs + "/font", $"fonts/{font.FileName}");
+        }
         w.WriteEndElement();
     }
 
@@ -339,6 +408,18 @@ public static class DocxWriter
         Style("Heading3", "heading 3", false, (int)Math.Round(bodyHalfPoints * 1.22), true, outline: 2);
         Style("Heading4", "heading 4", false, (int)Math.Round(bodyHalfPoints * 1.08), true, outline: 3);
         Style("Caption", "caption", false, Math.Max(2, bodyHalfPoints - 2), false, italic: true);
+
+        Style("CommentText", "annotation text", false, Math.Max(2, bodyHalfPoints - 2), false);
+
+        w.WriteStartElement("w", "style", WNs);
+        w.WriteAttributeString("w", "type", WNs, "character");
+        w.WriteAttributeString("w", "styleId", WNs, "CommentReference");
+        Val("name", "annotation reference");
+        w.WriteStartElement("w", "rPr", WNs);
+        Val("sz", "16");
+        Val("szCs", "16");
+        w.WriteEndElement();
+        w.WriteEndElement();
 
         w.WriteStartElement("w", "style", WNs);
         w.WriteAttributeString("w", "type", WNs, "character");
@@ -605,6 +686,9 @@ public static class DocxWriter
     {
         w.WriteStartElement("w", "p", WNs);
         WriteParagraphProperties(w, paragraph);
+
+        foreach (int id in paragraph.CommentIds) Marker(w, "commentRangeStart", id);
+
         foreach (var run in paragraph.Runs)
         {
             if (run.Hyperlink is { Length: > 0 } uri && parts.Hyperlinks.TryGetValue(uri, out string? id))
@@ -619,6 +703,94 @@ public static class DocxWriter
                 WriteRun(w, run, hyperlinkStyle: false);
             }
         }
+
+        foreach (int id in paragraph.CommentIds)
+        {
+            Marker(w, "commentRangeEnd", id);
+
+            // The reference is what Word draws the bubble against; without it the range is invisible.
+            w.WriteStartElement("w", "r", WNs);
+            w.WriteStartElement("w", "rPr", WNs);
+            w.WriteStartElement("w", "rStyle", WNs);
+            w.WriteAttributeString("w", "val", WNs, "CommentReference");
+            w.WriteEndElement();
+            w.WriteEndElement();
+            Marker(w, "commentReference", id);
+            w.WriteEndElement();
+        }
+
+        w.WriteEndElement();
+
+        static void Marker(XmlWriter w, string name, int id)
+        {
+            w.WriteStartElement("w", name, WNs);
+            w.WriteAttributeString("w", "id", WNs, id.ToString());
+            w.WriteEndElement();
+        }
+    }
+
+    private static void WriteComments(XmlWriter w, DocxDocument document)
+    {
+        w.WriteStartElement("w", "comments", WNs);
+        foreach (var comment in document.Comments)
+        {
+            w.WriteStartElement("w", "comment", WNs);
+            w.WriteAttributeString("w", "id", WNs, comment.Id.ToString());
+            w.WriteAttributeString("w", "author", WNs, comment.Author);
+            if (comment.Initials is { Length: > 0 }) w.WriteAttributeString("w", "initials", WNs, comment.Initials);
+            if (comment.Date is { } date)
+                w.WriteAttributeString("w", "date", WNs, date.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ"));
+
+            // A note wraps where the writer of it wrapped: each line of the note is a paragraph.
+            foreach (string line in comment.Text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+            {
+                w.WriteStartElement("w", "p", WNs);
+                w.WriteStartElement("w", "pPr", WNs);
+                w.WriteStartElement("w", "pStyle", WNs);
+                w.WriteAttributeString("w", "val", WNs, "CommentText");
+                w.WriteEndElement();
+                w.WriteEndElement();
+                w.WriteStartElement("w", "r", WNs);
+                WriteText(w, line);
+                w.WriteEndElement();
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+        }
+        w.WriteEndElement();
+    }
+
+    /// <summary>
+    /// Names the embedded fonts and hands Word the key to each. <c>w:subsetted</c> is the honest part: the
+    /// PDF stored only the glyphs it printed, so a letter typed into the document afterwards has no glyph.
+    /// </summary>
+    private static void WriteFontTable(XmlWriter w, PackageParts parts)
+    {
+        w.WriteStartElement("w", "fonts", WNs);
+        w.WriteAttributeString("xmlns", "r", null, RNs);
+
+        foreach (var group in parts.Fonts.GroupBy(f => f.Font.Family, StringComparer.Ordinal))
+        {
+            w.WriteStartElement("w", "font", WNs);
+            w.WriteAttributeString("w", "name", WNs, group.Key);
+            foreach (var font in group)
+            {
+                string element = (font.Font.Bold, font.Font.Italic) switch
+                {
+                    (true, true) => "embedBoldItalic",
+                    (true, false) => "embedBold",
+                    (false, true) => "embedItalic",
+                    _ => "embedRegular",
+                };
+                w.WriteStartElement("w", element, WNs);
+                w.WriteAttributeString("r", "id", RNs, font.RelationshipId);
+                w.WriteAttributeString("w", "fontKey", WNs, font.Key);
+                if (font.Font.IsSubset) w.WriteAttributeString("w", "subsetted", WNs, "true");
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+        }
+
         w.WriteEndElement();
     }
 

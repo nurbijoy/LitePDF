@@ -175,6 +175,10 @@ internal sealed class PageBuilder
     private readonly List<StyledSpan> _spans = [];
     private readonly List<PlacedImage> _images = [];
     private readonly List<RuleSegment> _rules = [];
+    private readonly List<FilledArea> _fills = [];
+    private readonly List<MarkedRange> _marks = [];
+    private readonly List<PageTag> _tags = [];
+    private int _mark = -1;
 
     public PageSize Size { get; init; } = new(612, 792);
 
@@ -232,6 +236,31 @@ internal sealed class PageBuilder
             _spans[^1] = _spans[^1] with { End = _text.Length };
         else
             _spans.Add(new StyledSpan(start, _text.Length, applied));
+
+        if (_mark < 0) return;
+        if (_marks.Count > 0 && _marks[^1].MarkedContentId == _mark && _marks[^1].End >= start)
+            _marks[^1] = _marks[^1] with { End = _text.Length };
+        else
+            _marks.Add(new MarkedRange(start, _text.Length, _mark));
+    }
+
+    /// <summary>Everything added after this is drawn inside that marked-content sequence, as a tagged PDF does.</summary>
+    public PageBuilder Mark(int markedContentId)
+    {
+        _mark = markedContentId;
+        return this;
+    }
+
+    public PageBuilder Tagged(params PageTag[] tags)
+    {
+        _tags.AddRange(tags);
+        return this;
+    }
+
+    public PageBuilder Fill(RectD bounds, uint color)
+    {
+        _fills.Add(new FilledArea(bounds, color));
+        return this;
     }
 
     public PageBuilder Image(RectD bounds, int width = 4, int height = 4)
@@ -249,6 +278,11 @@ internal sealed class PageBuilder
     public PageContent Build(int pageIndex = 0)
     {
         var text = PageText.Create(pageIndex, TextSource.Pdf, _text.ToString(), _boxes.ToArray());
-        return new PageContent(pageIndex, Size, text, _spans, _images, _rules);
+        return new PageContent(pageIndex, Size, text, _spans, _images, _rules)
+        {
+            Fills = _fills,
+            Marks = _marks,
+            Tags = _tags,
+        };
     }
 }

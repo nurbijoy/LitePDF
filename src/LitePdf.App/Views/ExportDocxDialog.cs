@@ -49,12 +49,21 @@ public sealed class ExportDocxDialog : DialogWindow
         var keepRow = new WrapPanel();
         keep.Children.Add(keepRow);
         Keep(keepRow, "images", "Pictures", true);
+        Keep(keepRow, "drawings", "Drawings", true);
         Keep(keepRow, "headings", "Headings", true);
         Keep(keepRow, "lists", "Lists", true);
         Keep(keepRow, "tables", "Tables", true);
         Keep(keepRow, "running", "Headers and footers", true);
         Keep(keepRow, "links", "Links", true);
         Keep(keepRow, "annotations", "Highlights and notes", true);
+
+        var layout = Section(body, "Rebuilding the layout");
+        Option(layout, "tags", "Use the document's own tags when it has them", true,
+            "A tagged PDF states what its headings, lists and tables are, which beats every guess.");
+        Option(layout, "unruled", "Also rebuild tables that draw no lines", false,
+            "Off by default: finding a table where there is only aligned text turns readable paragraphs into a mangled grid.");
+        Option(layout, "fonts", "Embed the fonts used in the document", false,
+            "Makes the file much larger, and most PDFs store only the letters they printed, so typing new text in Word can show empty boxes.");
 
         var text = Section(body, "Scanned pages");
         _recognize = new CheckBox
@@ -77,7 +86,18 @@ public sealed class ExportDocxDialog : DialogWindow
         };
         body.Children.Add(_error);
 
-        SetBody(body,
+        // The options outgrew a short screen. The window is capped to the work area and the body scrolls
+        // inside it, so the Convert button can never end up below the bottom of the display — which is
+        // what a dialog that sizes itself to its content does the moment the content grows.
+        MaxHeight = Math.Max(420, SystemParameters.WorkArea.Height - 48);
+        var scroller = new ScrollViewer
+        {
+            Content = body,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+        };
+
+        SetBody(scroller,
             MakeButton("Convert", accent: true, isDefault: true, onClick: Accept),
             MakeButton("Cancel", isCancel: true, onClick: () => DialogResult = false));
     }
@@ -111,6 +131,15 @@ public sealed class ExportDocxDialog : DialogWindow
         parent.Children.Add(box);
     }
 
+    /// <summary>A choice whose consequence is not obvious from its name, so it carries the reason with it.</summary>
+    private void Option(Panel parent, string key, string label, bool isChecked, string note)
+    {
+        Keep(parent, key, label, isChecked);
+        var text = Paragraph(note, 430);
+        text.Margin = new Thickness(26, -2, 0, 6);
+        parent.Children.Add(text);
+    }
+
     private bool On(string key) => _keep[key].IsChecked == true;
 
     private void Accept()
@@ -142,12 +171,16 @@ public sealed class ExportDocxDialog : DialogWindow
             Options = new ExportOptions
             {
                 Images = On("images"),
+                Drawings = On("drawings"),
                 Headings = On("headings"),
                 Lists = On("lists"),
                 Tables = On("tables"),
                 HeadersFooters = On("running"),
                 Hyperlinks = On("links"),
                 Annotations = On("annotations"),
+                UseTags = On("tags"),
+                UnruledTables = On("unruled"),
+                EmbedFonts = On("fonts"),
             },
         };
         DialogResult = true;

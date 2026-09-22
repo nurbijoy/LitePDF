@@ -36,4 +36,12 @@ for (int y = 0; y < plateHeight; y++)
 File.WriteAllBytes(Path.Combine(output, "sample-formatted.pdf"),
     SampleDocuments.CreateFormattedDocument(plate, plateWidth, plateHeight));
 
+// A tagged document: the structure tree states what the geometry would otherwise have to infer.
+File.WriteAllBytes(Path.Combine(output, "sample-tagged.pdf"),
+    SampleDocuments.CreateTaggedDocument(plate, plateWidth, plateHeight));
+
+// Vector artwork, a shaded table, a table with no lines, a picture inside a form, and a sticky note.
+File.WriteAllBytes(Path.Combine(output, "sample-drawings.pdf"),
+    SampleDocuments.CreateDrawingDocument(plate, plateWidth, plateHeight));
+
 Console.WriteLine($"Samples written to {output}");

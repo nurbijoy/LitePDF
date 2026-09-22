@@ -41,10 +41,12 @@ Everything above the PDFium layer uses **normalized page coordinates**: `RectD` 
 | `FractionSheet` | Lays every fraction half out as lines of type on one sheet for a second recognition pass, and reads the words back by position |
 | `OcrLayout` | Rebuilds the page from the recognizer's words: reading order by column, fractions, exponents, degree signs, figures |
 | `Storage` | `AppPaths`, atomic `JsonFile`, `AppSettings`, `RecentFileStore` (reading position per file), `DocumentKey` |
-| `PageContent` | What the DOCX export needs from a page: styled character spans, placed images, thin rules |
-| `ContentComposer` | Rebuilds a document from page geometry: columns, paragraphs, headings, lists, running heads |
+| `PageContent` | What the DOCX export needs from a page: styled character spans, placed images and drawings, thin rules, filled panels, the structure tree, embedded fonts |
+| `ContentComposer` | Rebuilds a document from page geometry: columns, paragraphs, headings, lists, running heads, comments |
 | `DocumentProfile` | Document-wide measurements: body size and font, text area, heading sizes, running heads |
+| `TagIndex` | A tagged PDF's structure tree resolved against its characters: headings, list items, cells, figures |
 | `TableBuilder` | Ruled tables: snaps the hairline rectangles into a grid and finds the spans |
+| `UnruledTableBuilder` | Tables that draw no lines, from the alignment of the words alone (opt-in) |
 | `DocxWriter` | Writes the Office Open XML package (`ZipArchive` + `XmlWriter`, no third-party library) |
 
 ## 4. PDFium (`LitePdf.Pdfium`)
@@ -107,9 +109,9 @@ A PDF has no paragraphs, only positioned glyphs, so every structure in the .docx
 principle is that **a rule that does not fire still leaves the content intact**: an unclaimed line becomes a
 correctly styled paragraph in the right place, and nothing is ever dropped to tidy the output.
 
-1. **`PdfContentReader`** (in `LitePdf.Pdfium`) reads the page: characters with their style, images and
-   thin rules. Style is read once per text object, not per character — a dense page has thousands of
-   characters and a handful of objects.
+1. **`PdfContentReader`** (in `LitePdf.Pdfium`) reads the page: characters with their style, images,
+   vector artwork, thin rules, filled panels and the structure tree. Style is read once per text object,
+   not per character — a dense page has thousands of characters and a handful of objects.
    - The visible size is measured from the loose char box against the text matrix, because
      `FPDFText_GetFontSize` reports the text-state size and ignores matrix scaling.
    - A plain `DCTDecode` image is copied out as JPEG bytes, untouched. Anything else is rendered — and
@@ -119,13 +121,28 @@ correctly styled paragraph in the right place, and nothing is ever dropped to ti
    - Text drawn with render mode 3 is the invisible OCR layer under a scan. It is used only when the page
      has no visible text of its own, and then the picture it sits under is skipped, or every word would be
      written twice.
+   - Objects inside a form XObject are walked with a matrix stack, because a nested object's bounds are in
+     the form's space; without it a picture placed through a form is dropped or lands in the wrong place.
+   - Paths are sorted into three kinds: a hairline is a table rule, an axis-aligned filled rectangle is a
+     panel (a shaded cell, a background), and everything else is artwork. Artwork is clustered into regions
+     and each is rasterized at 300 DPI with the text and image objects switched off
+     (`FPDFPageObj_SetIsActive`), so a chart arrives as one transparent PNG and its labels stay text.
+   - `FPDF_StructTree_*` gives the structure tree of a tagged PDF, and `FPDFPageObj_GetMarkedContentID`
+     ties each element to the characters and pictures it drew.
 2. **`DocumentProfile`** measures the document as a whole: body size (modal, weighted by characters),
    body font, text area and the running heads. Running heads are settled first, because a page number in
    the margin would otherwise drag the measured margins out to it.
-3. **`ContentComposer`** rebuilds each page: columns, then reading order, then paragraphs, then headings,
-   lists and tables. See §5d for why each rule is drawn where it is.
-4. **`DocxWriter`** writes the package. Everything goes through `XmlWriter`: one unescaped ampersand out of
-   a PDF is a "Word found unreadable content" prompt, which is a hard failure.
+3. **`TagIndex`** resolves the structure tree against the page's characters, when the PDF has one. There is
+   no second front end: the tags feed the same composer as everything else, as hints it trusts over its own
+   inference. A tagged file settles heading levels, which lines are one paragraph, which are list items and
+   where a table's cells are — and nothing else, because tags say nothing true about appearance.
+4. **`ContentComposer`** rebuilds each page: columns, then reading order, then paragraphs, then headings,
+   lists and tables, then anchors the page's sticky notes as Word comments. See §5d for why each rule is
+   drawn where it is.
+5. **`DocxWriter`** writes the package: document, styles, numbering, media, headers and footers, comments,
+   and — only when asked — the font table with each font obfuscated the way Word stores one. Everything
+   goes through `XmlWriter`: one unescaped ampersand out of a PDF is a "Word found unreadable content"
+   prompt, which is a hard failure.
 
 ### 5d. Why these rules and not others
 - **A line ends its paragraph only if the next line's first word would have fitted on it.** A fixed
@@ -140,8 +157,16 @@ correctly styled paragraph in the right place, and nothing is ever dropped to ti
   items are all one line and all the same width reads as one paragraph.
 - **The page number in a running head is the digit run that tracks the page across every sample.**
   "Section 1, page 1" has two, and on the first page they are both 1.
-- **Only ruled tables are rebuilt.** A table held together by alignment alone would mean deciding that two
-  columns of prose are a grid, and getting that wrong turns readable text into a mangled table.
+- **A table is trusted in this order: drawn, tagged, then guessed.** The grid a PDF actually draws is a
+  fact; a tagged file's cells are a fact it states; alignment alone is an inference, and getting it wrong
+  turns readable prose into a mangled grid, so that one is off unless the export is asked for it.
+- **Tags settle grouping, never appearance.** A tagged file will mark a run as `/P` and draw it bold at
+  18 pt, so structure comes from the tags and every font, size and colour still comes from the glyphs.
+- **Vector artwork is rasterized, not translated.** Word's DrawingML could express the beziers, but PDF's
+  clips, soft masks, blend modes, shadings and patterns are a project the size of the rest of the export,
+  and a half-translated chart is worse than a faithful picture of one.
+- **A filled rectangle with text on top of it is a panel, not a drawing.** Rasterizing one would paint a
+  picture of the page over the words that were lifted off it.
 - **Left and top margins are the median; right and bottom are a high percentile capped by the facing
   margin.** A page only reaches the right margin when its content is long enough, so the median there
   reports the margins of the emptiest half of the document.
@@ -189,7 +214,7 @@ Viewer/                  PdfViewer (input, zoom, selection, search hits), PagesP
                          PageVisual (bitmap + detail tile + overlays)
 ViewModels/              MainViewModel (bindable state), DocumentTab (per-tab state) + item view models
 Views/Dialogs.cs         DialogWindow base, message/password/text input/OCR result/properties/settings dialogs
-Views/ExportDocxDialog   Page range and what to keep for the Word conversion
+Views/ExportDocxDialog   Page range, what to keep, and how much to infer, for the Word conversion
 MainWindow*.cs           Window controller split by area: core (keys, menus, layout), Document (open/save/print/tabs),
                          Panels (thumbnails, chapters, search, annotations), Actions (copy, markup, notes, OCR)
 ```

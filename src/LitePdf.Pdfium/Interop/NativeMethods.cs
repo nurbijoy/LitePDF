@@ -91,6 +91,17 @@ internal static unsafe partial class NativeMethods
 
     public const int FPDF_FILLMODE_NONE = 0;
 
+    // Path segment types (fpdf_edit.h).
+    public const int FPDF_SEGMENT_UNKNOWN = -1;
+    public const int FPDF_SEGMENT_LINETO = 0;
+    public const int FPDF_SEGMENT_BEZIERTO = 1;
+    public const int FPDF_SEGMENT_MOVETO = 2;
+
+    /// <summary>Value types a structure element attribute can hold (fpdf_structtree.h).</summary>
+    public const int FPDF_OBJECT_NUMBER = 2;
+    public const int FPDF_OBJECT_STRING = 3;
+    public const int FPDF_OBJECT_NAME = 4;
+
     public const int FPDF_ANNOT_TEXT = 1;
     public const int FPDF_ANNOT_LINK = 2;
     public const int FPDF_ANNOT_HIGHLIGHT = 9;
@@ -184,6 +195,34 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Lib)] public static partial int FPDFPathSegment_GetPoint(nint segment, float* x, float* y);
     [LibraryImport(Lib)] public static partial int FPDFPathSegment_GetType(nint segment);
     [LibraryImport(Lib)] public static partial int FPDFPath_GetDrawMode(nint path, int* fillMode, int* stroke);
+
+    // Marked content, which is what ties a page object to an element of the structure tree.
+    [LibraryImport(Lib)] public static partial int FPDFPageObj_GetMarkedContentID(nint pageObject);
+
+    // Embedded font programs (fpdf_edit.h), for the optional font embedding.
+    [LibraryImport(Lib)] public static partial int FPDFFont_GetIsEmbedded(nint font);
+    [LibraryImport(Lib)] public static partial int FPDFFont_GetFontData(nint font, byte* buffer, nuint bufLen, nuint* outBufLen);
+
+    // Structure tree (fpdf_structtree.h): the answer a tagged PDF already carries.
+    [LibraryImport(Lib)] public static partial nint FPDF_StructTree_GetForPage(nint page);
+    [LibraryImport(Lib)] public static partial void FPDF_StructTree_Close(nint structTree);
+    [LibraryImport(Lib)] public static partial int FPDF_StructTree_CountChildren(nint structTree);
+    [LibraryImport(Lib)] public static partial nint FPDF_StructTree_GetChildAtIndex(nint structTree, int index);
+    [LibraryImport(Lib)] public static partial int FPDF_StructElement_CountChildren(nint element);
+    [LibraryImport(Lib)] public static partial nint FPDF_StructElement_GetChildAtIndex(nint element, int index);
+    [LibraryImport(Lib)] public static partial int FPDF_StructElement_GetChildMarkedContentID(nint element, int index);
+    [LibraryImport(Lib)] public static partial uint FPDF_StructElement_GetType(nint element, char* buffer, uint bufLen);
+    [LibraryImport(Lib)] public static partial uint FPDF_StructElement_GetAltText(nint element, char* buffer, uint bufLen);
+    [LibraryImport(Lib)] public static partial uint FPDF_StructElement_GetTitle(nint element, char* buffer, uint bufLen);
+    [LibraryImport(Lib)] public static partial int FPDF_StructElement_GetMarkedContentIdCount(nint element);
+    [LibraryImport(Lib)] public static partial int FPDF_StructElement_GetMarkedContentIdAtIndex(nint element, int index);
+    [LibraryImport(Lib)] public static partial int FPDF_StructElement_GetAttributeCount(nint element);
+    [LibraryImport(Lib)] public static partial nint FPDF_StructElement_GetAttributeAtIndex(nint element, int index);
+    [LibraryImport(Lib)] public static partial int FPDF_StructElement_Attr_GetCount(nint attr);
+    [LibraryImport(Lib)] public static partial int FPDF_StructElement_Attr_GetName(nint attr, int index, byte* buffer, uint bufLen, uint* outBufLen);
+    [LibraryImport(Lib)] public static partial nint FPDF_StructElement_Attr_GetValue(nint attr, byte* name);
+    [LibraryImport(Lib)] public static partial int FPDF_StructElement_Attr_GetType(nint value);
+    [LibraryImport(Lib)] public static partial int FPDF_StructElement_Attr_GetNumberValue(nint value, float* outValue);
 
     // Bitmaps produced by PDFium itself (FPDFImageObj_GetRenderedBitmap) carry their own size and format.
     [LibraryImport(Lib)] public static partial int FPDFBitmap_GetWidth(nint bitmap);

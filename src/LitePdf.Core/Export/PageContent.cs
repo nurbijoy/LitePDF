@@ -33,6 +33,12 @@ public sealed record ImageBits(int Width, int Height, byte[] Bgra);
 /// </summary>
 public sealed record PlacedImage(RectD Bounds, byte[]? Encoded, string? Extension, ImageBits? Bits)
 {
+    /// <summary>True for a drawing rasterized out of path operators rather than an image the PDF stores.</summary>
+    public bool IsDrawing { get; init; }
+
+    /// <summary>The marked-content id of the object, or -1: what ties it to a <c>/Figure</c> and its alt text.</summary>
+    public int MarkedContentId { get; init; } = -1;
+
     public static PlacedImage FromEncoded(RectD bounds, byte[] bytes, string extension) =>
         new(bounds, bytes, extension, null);
 
@@ -41,6 +47,66 @@ public sealed record PlacedImage(RectD Bounds, byte[]? Encoded, string? Extensio
 
 /// <summary>A thin filled or stroked line: a table rule, an underline, a box edge.</summary>
 public readonly record struct RuleSegment(RectD Bounds, bool IsHorizontal);
+
+/// <summary>
+/// A filled rectangle drawn behind something: a shaded table cell, a banded row, a coloured panel.
+/// Kept apart from <see cref="RuleSegment"/> because only the colour of these is of any use.
+/// </summary>
+public readonly record struct FilledArea(RectD Bounds, uint Color);
+
+/// <summary>Characters [Start, End) of the page's text that were drawn inside one marked-content sequence.</summary>
+public readonly record struct MarkedRange(int Start, int End, int MarkedContentId);
+
+/// <summary>
+/// One element of a tagged PDF's structure tree, with the marked-content ids that tie it to the page.
+///
+/// A tagged PDF already knows what its own paragraphs, headings, lists and tables are, which is information
+/// no amount of geometry can recover reliably. Tags are trusted for grouping and order only: they routinely
+/// mark a run as <c>/P</c> while drawing it bold at 18 pt, so appearance still comes from the glyphs.
+/// </summary>
+public sealed record PageTag(string Type, IReadOnlyList<PageTag> Children)
+{
+    public string? AltText { get; init; }
+
+    public string? Title { get; init; }
+
+    /// <summary>Marked-content ids drawn directly by this element (its children carry their own).</summary>
+    public IReadOnlyList<int> MarkedContentIds { get; init; } = [];
+
+    public int RowSpan { get; init; } = 1;
+
+    public int ColumnSpan { get; init; } = 1;
+
+    public IEnumerable<PageTag> Descendants()
+    {
+        foreach (var child in Children)
+        {
+            yield return child;
+            foreach (var nested in child.Descendants()) yield return nested;
+        }
+    }
+}
+
+/// <summary>
+/// A font program lifted out of the PDF, for the optional embedding. <see cref="IsSubset"/> matters: an
+/// embedded subset holds only the glyphs the PDF used, so typing a new letter in Word shows a box.
+/// </summary>
+public sealed record EmbeddedFont(string Family, bool Bold, bool Italic, byte[] Data, bool IsSubset);
+
+/// <summary>What a caller wants read off the page. The costly parts are opt-in.</summary>
+public sealed record PageContentRequest
+{
+    /// <summary>Rasterize vector artwork (charts, logos) that no image object holds.</summary>
+    public bool Drawings { get; init; } = true;
+
+    /// <summary>Read the structure tree of a tagged PDF.</summary>
+    public bool Tags { get; init; } = true;
+
+    /// <summary>Lift out embedded font programs. Off by default: it copies megabytes per document.</summary>
+    public bool Fonts { get; init; }
+
+    public static PageContentRequest Default { get; } = new();
+}
 
 /// <summary>Everything the DOCX export needs from one page. Geometry is normalized page coordinates.</summary>
 public sealed record PageContent(
@@ -51,6 +117,18 @@ public sealed record PageContent(
     IReadOnlyList<PlacedImage> Images,
     IReadOnlyList<RuleSegment> Rules)
 {
+    /// <summary>Filled rectangles, which is where a shaded table cell gets its colour.</summary>
+    public IReadOnlyList<FilledArea> Fills { get; init; } = [];
+
+    /// <summary>The roots of the page's structure tree, empty when the PDF is not tagged.</summary>
+    public IReadOnlyList<PageTag> Tags { get; init; } = [];
+
+    /// <summary>Character ranges by marked-content id, which is how a tag finds its text.</summary>
+    public IReadOnlyList<MarkedRange> Marks { get; init; } = [];
+
+    /// <summary>Font programs used on the page, read only when the export asks to embed them.</summary>
+    public IReadOnlyList<EmbeddedFont> Fonts { get; init; } = [];
+
     public static PageContent Empty(int pageIndex, PageSize size) =>
         new(pageIndex, size, PageText.Empty(pageIndex), [], [], []);
 
@@ -74,5 +152,6 @@ public sealed record PageContent(
 /// <summary>A document that can report the drawing behind its text, over and above <see cref="IPdfDocument"/>.</summary>
 public interface IPageContentSource
 {
-    Task<PageContent> GetPageContentAsync(int pageIndex, int priority, CancellationToken ct = default);
+    Task<PageContent> GetPageContentAsync(
+        int pageIndex, int priority, PageContentRequest? request = null, CancellationToken ct = default);
 }

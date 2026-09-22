@@ -1,8 +1,8 @@
 # DOCX export design
 
-Design for "Convert to Word" (`T-F6`). Status: **phases 0–4 implemented** (2026-09-21); see `TASKS.md` for
-what was verified and what is still missing, and `docs/BLUEPRINT.md` §5c/5d for the architecture as built.
-This file keeps the reasoning behind the design.
+Design for "Convert to Word" (`T-F6`, finished by `T-F7`). Status: **every phase implemented**
+(2026-09-22); see `TASKS.md` for what was verified and what is still missing, and `docs/BLUEPRINT.md`
+§5c/5d for the architecture as built. This file keeps the reasoning behind the design.
 
 ## 1. Goal, and the honest ceiling
 
@@ -21,7 +21,7 @@ real character styles, real images, real tables. Not a picture of the PDF, and n
 
 Invariant 1 is testable and is the acceptance test for every phase (§8).
 
-## 2. Two front ends, one model
+## 2. Two ways in, one model
 
 The single biggest fidelity lever is that **a tagged PDF already contains the answer**. `FPDF_StructTree_*` and
 `FPDF_StructElement_*` are exported by the shipped PDFium (155.0.8057) and expose `/P`, `/H1`–`/H6`, `/Table`,
@@ -30,21 +30,28 @@ objects that draw it (`FPDFPageObj_GetMarkedContentID`). Anything exported from 
 government/accessibility pipeline is tagged.
 
 ```
-tagged PDF   ──► StructReader     ─┐
-                                   ├─► ExportDocument (IR) ──► DocxWriter ──► .docx
-untagged PDF ──► ContentComposer  ─┤                     (ZipArchive + XmlWriter)
-                                   │
-scanned PDF  ──► OCR ──► PageText ─┘
+tagged PDF   ──► tags ──► TagIndex ───┐  (grouping, trusted over inference)
+                                     │
+untagged PDF ──► glyphs ────────────┼─► ContentComposer ─► DocxDocument (IR) ─► DocxWriter ─► .docx
+                                     │                                       (ZipArchive + XmlWriter)
+scanned PDF  ──► OCR ──► PageText ────┘
 ```
 
-Both front ends produce the same IR, so `DocxWriter` and every test are shared. The geometry path
-(`ContentComposer`) is the fallback and carries the weight for untagged files; the structure path trusts the
-tags for *grouping and order only* and still reads styling from the glyphs, because tags say nothing about
-what a run looks like.
+One composer, one IR, one writer, so `DocxWriter` and every test are shared. The geometry carries the weight;
+the tags are consulted for *grouping and order only* and styling always comes from the glyphs, because tags
+say nothing true about what a run looks like.
 
-> **As built:** only the geometry path and the scan path exist. `StructReader` is not written; the exports it
-> needs are present in the shipped PDFium and the IR is already shared, so it can be added without moving
-> anything else. `T-F7` tracks it.
+> **As built (2026-09-22): one pipeline, not two.** The tags are read — `FPDF_StructTree_*` plus
+> `FPDFPageObj_GetMarkedContentID` — but they did not get a front end of their own. `TagIndex` resolves the
+> structure tree against the page's characters and hands the geometry path answers it trusts over its own
+> inference: this element is a level-two heading, those two blocks are one paragraph, these nine ranges are
+> a table's cells, that picture is this figure with this alt text.
+>
+> The second front end was dropped deliberately. Everything in §5 — columns, alignment, indents, hyphens,
+> running heads, page joins — is needed whether or not a file is tagged, because tags describe grouping and
+> say nothing about layout; a separate path would have had to borrow all of it and then drift from it. The
+> cost of the choice is that reading order still comes from the geometry rather than from the tag order,
+> which differ only where a page is set in an unusual way.
 
 The scan path is nearly free: `OcrLayout` already returns a `PageText`, the same type PDF text produces, so
 `ContentComposer` consumes it unchanged. Recognition quality is then the only difference.
@@ -53,14 +60,16 @@ The scan path is nearly free: `OcrLayout` already returns a `PageText`, the same
 
 | Where | What | Why |
 |---|---|---|
-| `Core/Export/PageContent.cs` | What a page yields: `TextStyle`, `StyledSpan`, `PlacedImage`, `RuleSegment`, `IPageContentSource` | Core has no dependencies; all of it is plain data |
-| `Core/Export/DocxModel.cs` | IR: `DocxDocument`, `DocxSection`, `DocxParagraph`, `DocxRun`, `DocxTable`, `DocxPicture` | Prefixed because WPF has a `Paragraph`, `Run`, `Table` and `Section` of its own |
-| `Core/Export/ContentComposer.cs` | Geometry → IR: columns, paragraphs, headings, lists, alignment, tables | Pure functions over boxes; unit-testable without a PDF |
+| `Core/Export/PageContent.cs` | What a page yields: `TextStyle`, `StyledSpan`, `PlacedImage`, `RuleSegment`, `FilledArea`, `PageTag`, `MarkedRange`, `EmbeddedFont`, `IPageContentSource` | Core has no dependencies; all of it is plain data |
+| `Core/Export/DocxModel.cs` | IR: `DocxDocument`, `DocxSection`, `DocxParagraph`, `DocxRun`, `DocxTable`, `DocxPicture`, `DocxComment` | Prefixed because WPF has a `Paragraph`, `Run`, `Table` and `Section` of its own |
+| `Core/Export/ContentComposer.cs` | Geometry → IR: columns, paragraphs, headings, lists, alignment, tables, comments | Pure functions over boxes; unit-testable without a PDF |
 | `Core/Export/DocumentProfile.cs` | Document-wide measurements and the running heads | Has to be global; see §5 |
+| `Core/Export/TagIndex.cs` | The structure tree resolved against the page's characters | The one place that knows what a tag means; see §2 |
 | `Core/Export/TableBuilder.cs` | Ruled table reconstruction | Separable, and the most likely to churn |
+| `Core/Export/UnruledTableBuilder.cs` | Tables with no lines, from alignment alone | The one rule that can damage a document, so it is kept apart and opt-in |
 | `Core/Export/FontMapper.cs` | PDF base font name → an installed family | Unit-testable on its own |
 | `Core/Export/DocxWriter.cs` | IR → OPC package, and `IImageEncoder` | `System.IO.Compression` + `XmlWriter`, both BCL |
-| `Pdfium/PdfContentReader.cs` | Page → `PageContent`: styled spans, placed images, rules | Only `Pdfium` may touch `Interop` (rule 1) |
+| `Pdfium/PdfContentReader.cs` | Page → `PageContent`: styled spans, images, drawings, rules, fills, tags, fonts | Only `Pdfium` may touch `Interop` (rule 1) |
 | `App/Documents/DocxExport.cs` | Drives the conversion, and `WpfImageEncoder` | `PngBitmapEncoder` is the only PNG encoder in the box |
 | `App/Views/ExportDocxDialog` + `MainWindow.Document.cs` | Range, options, progress, cancel | Mirrors the print dialog and the OCR progress card |
 
@@ -103,11 +112,24 @@ re-encoding it to JPEG would lose a generation for nothing.
 ### Why vector art is rasterized
 Word's DrawingML can express beziers, but translating PDF's graphics state — clips, soft masks, blend modes,
 shadings, patterns — is a project the size of the rest of this feature. Instead, non-text objects that are not
-images are clustered by overlapping bounds into a `VectorRegion`, text objects are switched off with
-`FPDFPageObj_SetIsActive(false)`, the region is rendered at 300 DPI with `FPDF_RenderPageBitmapWithMatrix`, and
-the text objects are switched back on. The result is one crisp PNG in the right place, and any text that sat
-*inside* the region is still emitted as text rather than being swallowed — which is what
-`PageStructure.FindFigures` already does for scans.
+images are clustered by overlapping bounds into a region, the text and image objects are switched off with
+`FPDFPageObj_SetIsActive(false)`, the region is rendered at 300 DPI onto a transparent bitmap, and they are
+switched back on. The result is one crisp PNG in the right place, and any text that sat *inside* the region is
+still emitted as text rather than being swallowed — which is what `PageStructure.FindFigures` already does
+for scans.
+
+**As built,** three kinds of path are told apart before any of that, because they are three different things:
+a hairline is a table rule and is kept as geometry; an axis-aligned filled rectangle is a panel and is kept as
+a colour; everything else is artwork and is drawn. A filled rectangle counts as a background only when it is
+pale, page-sized, or has the page's own text printed on top of it — a bar of a bar chart is none of those.
+The rectangle test is geometric (four corners, edges along the axes) rather than a segment count, because a
+triangle has four straight segments too, and a triangle with a caption across it would have been filed as a
+panel behind the text and silently dropped.
+
+Rules that fall *inside* a region are taken with it, so a chart keeps its axes. A region is skipped when it is
+smaller than a mark, larger than most of the page, or covers half the page with the body text inside it: that
+last one is a border drawn around the page, and rasterizing it would drop a picture of the page on top of the
+document it was read from.
 
 ## 5. Building the document (`ContentComposer`)
 
@@ -160,15 +182,26 @@ images, rules and vector regions.
 
 Phase 4, and the part most likely to need iteration against real files.
 
-- **Ruled tables.** Thin path rectangles (`PageStructure.Rules` already finds these on scans; the vector path
-  reader gives them exactly for PDF text) snap into a grid of horizontal and vertical lines. Cells are grid
-  rectangles; a cell spanning missing interior lines becomes `w:gridSpan` / `w:vMerge`. Borders, and fill from
-  `FPDFPageObj_GetFillColor`, carry over.
-- **Unruled tables.** Three or more consecutive lines whose fragments align into the same two or more column
-  bands with consistent gaps. Deliberately conservative: two columns of prose in a newsletter must not become
-  a table.
-- A table that fails both detectors stays as paragraphs — a worse-looking but complete and editable result,
-  which beats a mangled `w:tbl`.
+Three detectors, in the order they are trusted; the first to claim a region of the page wins. A table that
+fails all three stays as paragraphs — a worse-looking but complete and editable result, which beats a
+mangled `w:tbl`.
+
+1. **Ruled tables.** Thin paths — filled hairline rectangles *or* stroked lines, which is how a great many
+   PDFs draw a grid — snap into horizontal and vertical boundaries. Cells are grid rectangles; a cell
+   spanning missing interior lines becomes `w:gridSpan` / `w:vMerge`. Fill from `FPDFPageObj_GetFillColor`
+   carries over as `w:shd`, taken from the smallest rectangle that covers the cell: a header row is shaded
+   with one wide rectangle behind three cells, while a rectangle behind the whole table is the table's own
+   background and is left alone.
+2. **Tagged tables.** `/Table`, `/TR`, `/TD`, `/TH`, with `/ColSpan` and `/RowSpan`. Cells are laid out the
+   way a browser lays out a table — each takes the next free slot of its row, and a row-spanning cell keeps
+   the slots under it occupied. Column widths come from where the cells *start*, not from how wide their text
+   happens to be, or a table of short words comes out as a huddle of narrow columns in the middle of the page.
+   Borders follow the PDF: a tagged table that drew no lines gets none in Word either.
+3. **Unruled tables**, and only when the export is asked for them. Three or more consecutive lines, each cut
+   into the same number of pieces by gaps several characters wide, whose columns line up on one edge down the
+   whole run and never overlap, with no piece long enough to be a sentence. Two columns of prose never pass:
+   they are split into reading columns long before this runs, and even side by side their words do not line up
+   from one line to the next.
 
 ## 7. Writing the package (`DocxWriter`)
 
@@ -187,11 +220,24 @@ prompt.
 1 inch = 914400 EMU (image extents); colours are `RRGGBB` hex. Each has a different scale, and getting one
 wrong is silent and ugly.
 
-**Fonts** are referenced by name, not embedded, in phase 1: the subset prefix (`ABCDEF+`) is stripped and the
-base-14 names are mapped (Helvetica → Arial, Times → Times New Roman, Courier → Courier New, ZapfDingbats →
-Wingdings). Embedding is possible later — `FPDFFont_GetFontData` returns the font file, and Word's
-`w:embedRegular` wants it obfuscated by XOR against the GUID in the part name — but an embedded *subset* holds
-only the glyphs the PDF used, so typing a new letter shows a box. Phase 5, opt-in, never the default.
+**Fonts** are referenced by name by default: the subset prefix (`ABCDEF+`) is stripped and the base-14 names
+are mapped (Helvetica → Arial, Times → Times New Roman, Courier → Courier New, ZapfDingbats → Wingdings).
+
+**Embedding is opt-in and stays that way.** `FPDFFont_GetFontData` returns the font file; only sfnt fonts
+(TrueType and OpenType) are taken, because a Type 1 or a bare CFF is a part Word would refuse to open the
+document over. Each goes to `word/fonts/fontN.odttf` with its first 32 bytes XORed against the 16 bytes of a
+fresh GUID taken in reverse order, and that GUID goes in `w:fontKey`. It is not encryption — only enough that
+the file is not an installable font — but a font stored plainly is a font Word will not load. Every embedded
+font is declared `w:subsetted`: PDFium returns the base name with the subset tag already stripped, so there is
+nothing left to tell a subset from a whole font, and nearly all of them are subsets. Declaring it is the safe
+direction, because Word then knows the font may not hold every glyph. It is also exactly why this is never the
+default: an embedded subset holds only the glyphs the PDF printed, so typing a new letter shows a box.
+
+**Comments.** A PDF sticky note is a comment in everything but name, so it becomes one: `word/comments.xml`,
+`w:commentRangeStart`/`End`, and a reference run on the paragraph the note sits against — the nearest one,
+because the icon is placed beside the text rather than in it. A markup annotation carrying a note of its own
+gets both the highlight and the comment. Left in the body a note would interrupt the text at the point it was
+written, and dropped it would be content lost without a word.
 
 ## 8. Verification
 
@@ -207,8 +253,13 @@ Beyond the standard definition of done in `AGENTS.md`:
 - **Manual.** Open each output in Word *and* LibreOffice with no repair prompt; edit a paragraph and confirm
   it reflows; compare against the PDF side by side.
 
-`SampleGen` needs new fixtures: a styled multi-heading document, a ruled table, a bulleted list, a
-header/footer with page numbers, a two-column page, an embedded photo, and a tagged PDF.
+`SampleGen` writes the fixtures: `sample-formatted.pdf` (headings, ragged prose, a bulleted and a numbered
+list, a ruled table, a plate at 200 DPI, a running head and foot with a page number), `sample-tagged.pdf` (a
+structure tree with a heading, a two-item list, a three-column table that draws no lines, and a figure with
+alt text — note that a reader finds a page's structure through `/ParentTree`, entry by marked-content id, not
+by walking `/K` from the root, so a fixture without one comes back nearly empty), and `sample-drawings.pdf`
+(a bar chart drawn with path operators, a table ruled with stroked lines and a shaded header row, a table with
+no lines at all, a picture inside a form XObject, and a sticky note).
 
 ## 9. Phases
 
@@ -218,15 +269,14 @@ Each is independently shippable and leaves the app in a releasable state.
 |---|---|---|
 | **0** | Interop bindings, `PdfContentReader`, `StyledSpan`, IR types, tests | **Done** |
 | **1** | `ContentComposer` paragraphs/headings/alignment, `DocxWriter`, export dialog, progress, cancel | **Done** |
-| **2** | Images (JPEG passthrough + PNG), placement, vector regions | **Done** except vector regions |
+| **2** | Images (JPEG passthrough + PNG), placement, vector regions | **Done** |
 | **3** | Lists, hyperlinks, headers/footers, outline-driven headings, highlights and notes | **Done** |
-| **4** | Ruled, then unruled, tables | Ruled **done**; unruled deliberately not attempted |
-| **5** | Multi-column reading order, tagged-PDF front end, OCR path for scans, optional font embedding | Columns and the OCR path **done**; tags and font embedding not |
+| **4** | Ruled, then unruled, tables | **Done**; unruled is opt-in |
+| **5** | Multi-column reading order, tagged PDFs, OCR path for scans, optional font embedding | **Done** |
 
-Two things from phase 2 and 5 were moved out rather than built, and both for the same reason given above:
-vector drawings need the figure-region rasterization to be worth doing properly, and the tagged-PDF front
-end is a second code path that earns its keep only once the geometry path has been measured against real
-files. `T-F7` in `TASKS.md` tracks them.
+Nothing is left outstanding as a phase. What remains is in the known limits in `TASKS.md`: reading order on a
+tagged page still comes from the geometry rather than the tag order, and right-to-left and vertical text are
+still untested.
 
 ## 10. Open risks
 

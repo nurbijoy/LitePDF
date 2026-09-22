@@ -54,6 +54,7 @@ public static class DocxExport
 
         var pages = new List<PageContent>(settings.Pages.Count);
         var extras = new List<PageExtras>(settings.Pages.Count);
+        var pool = new ImagePool();
 
         for (int i = 0; i < settings.Pages.Count; i++)
         {
@@ -62,7 +63,7 @@ public static class DocxExport
             progress?.Report(((double)i / settings.Pages.Count,
                 settings.Pages.Count == 1 ? $"Page {index + 1}" : $"Page {index + 1} · {i + 1} of {settings.Pages.Count}"));
 
-            var content = await ReadPageAsync(session, index, settings, ct);
+            var content = pool.Share(await ReadPageAsync(session, index, settings, ct));
             pages.Add(content);
             extras.Add(await ReadExtrasAsync(session, index, settings.Options, ct));
         }
@@ -95,12 +96,59 @@ public static class DocxExport
         return blocks;
     }
 
+    /// <summary>
+    /// Makes every page that draws the same picture share one copy of it.
+    ///
+    /// The whole document is held in memory while it converts, and a logo — rasterized from vector art or
+    /// stored as an image — is drawn on every page of a report. Four hundred pages of a quarter-megabyte
+    /// logo is a hundred megabytes of the same bytes; the writer would deduplicate them, but only after
+    /// they had all been read. Hashing each picture as it arrives costs a millisecond and caps the rest.
+    /// </summary>
+    private sealed class ImagePool
+    {
+        private readonly Dictionary<string, PlacedImage> _byContent = new(StringComparer.Ordinal);
+
+        public PageContent Share(PageContent page)
+        {
+            if (page.Images.Count == 0) return page;
+
+            var shared = new List<PlacedImage>(page.Images.Count);
+            foreach (var image in page.Images)
+            {
+                byte[] bytes = image.Encoded ?? image.Bits?.Bgra ?? [];
+                if (bytes.Length == 0)
+                {
+                    shared.Add(image);
+                    continue;
+                }
+
+                string key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes));
+                if (_byContent.TryGetValue(key, out var first))
+                {
+                    // Same pixels, a different place on a different page: keep this one's own bounds.
+                    shared.Add(first with
+                    {
+                        Bounds = image.Bounds,
+                        IsDrawing = image.IsDrawing,
+                        MarkedContentId = image.MarkedContentId,
+                    });
+                    continue;
+                }
+
+                _byContent[key] = image;
+                shared.Add(image);
+            }
+
+            return page with { Images = shared };
+        }
+    }
+
     private static async Task<PageContent> ReadPageAsync(
         DocumentSession session, int index, DocxExportSettings settings, CancellationToken ct)
     {
         var size = session.PageSizes[index];
         var content = session.Document is IPageContentSource source
-            ? await source.GetPageContentAsync(index, RenderPriority.Background, ct)
+            ? await source.GetPageContentAsync(index, RenderPriority.Background, settings.Options.ToPageRequest(), ct)
             : PageContent.Empty(index, size);
 
         if (content.Text.VisibleCharCount < DocumentSession.MinTextChars && settings.RecognizeScans)

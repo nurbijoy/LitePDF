@@ -14,10 +14,33 @@ public sealed record ExportOptions
     public bool Hyperlinks { get; init; } = true;
     public bool Annotations { get; init; } = true;
 
+    /// <summary>Carry vector artwork — charts, diagrams, logos — across as pictures.</summary>
+    public bool Drawings { get; init; } = true;
+
+    /// <summary>Use the structure tree when the PDF is tagged, rather than inferring everything.</summary>
+    public bool UseTags { get; init; } = true;
+
+    /// <summary>
+    /// Rebuild tables that draw no lines. Off by default: see <see cref="UnruledTableBuilder"/> for why a
+    /// false positive here is worse than the table it would have found.
+    /// </summary>
+    public bool UnruledTables { get; init; }
+
+    /// <summary>Embed the PDF's font programs. Off by default; an embedded subset cannot be typed in.</summary>
+    public bool EmbedFonts { get; init; }
+
     /// <summary>Joins a paragraph that runs from the foot of one page to the head of the next.</summary>
     public bool JoinAcrossPages { get; init; } = true;
 
     public static ExportOptions Default { get; } = new();
+
+    /// <summary>What the reader has to go and fetch for these options; the costly parts are opt-in.</summary>
+    public PageContentRequest ToPageRequest() => new()
+    {
+        Drawings = Drawings && Images,
+        Tags = UseTags,
+        Fonts = EmbedFonts,
+    };
 }
 
 /// <summary>Per-page input beyond the drawing itself.</summary>
@@ -62,13 +85,14 @@ public static class ContentComposer
 
         var profile = DocumentProfile.Build(pages, outline, options);
         var headings = profile.Outline;
+        var comments = new CommentSink();
 
         var composed = new List<(PageContent Page, List<DocxBlock> Blocks)>(pages.Count);
         for (int i = 0; i < pages.Count; i++)
         {
             var page = pages[i];
             var pageExtras = extras is not null && i < extras.Count ? extras[i] : PageExtras.None;
-            composed.Add((page, ComposePage(page, pageExtras, profile, headings, options)));
+            composed.Add((page, ComposePage(page, pageExtras, profile, headings, options, comments)));
         }
 
         var sections = BuildSections(composed, profile, options);
@@ -81,46 +105,167 @@ public static class ContentComposer
             Author = string.IsNullOrWhiteSpace(info?.Author) ? null : info!.Author,
             BodySizePoints = profile.BodySize,
             BodyFont = profile.BodyFont,
+            Comments = comments.Comments,
+            Fonts = options.EmbedFonts ? CollectFonts(pages) : [],
         };
+    }
+
+    /// <summary>One font program per family and style, the first one seen winning.</summary>
+    private static List<EmbeddedFont> CollectFonts(IReadOnlyList<PageContent> pages)
+    {
+        const int MaxFonts = 24;
+        var fonts = new List<EmbeddedFont>();
+        var seen = new HashSet<(string, bool, bool)>();
+
+        foreach (var page in pages)
+        {
+            foreach (var font in page.Fonts)
+            {
+                if (fonts.Count >= MaxFonts) return fonts;
+                if (font.Data.Length == 0 || !seen.Add((font.Family, font.Bold, font.Italic))) continue;
+                fonts.Add(font);
+            }
+        }
+        return fonts;
+    }
+
+    /// <summary>Collects the document's comments so their ids are unique across every page.</summary>
+    private sealed class CommentSink
+    {
+        public List<DocxComment> Comments { get; } = [];
+
+        public int Add(string author, string text, DateTimeOffset? date)
+        {
+            int id = Comments.Count + 1;
+            string name = string.IsNullOrWhiteSpace(author) ? "PDF" : author.Trim();
+            Comments.Add(new DocxComment(id, name, text) { Date = date, Initials = InitialsOf(name) });
+            return id;
+        }
+
+        private static string InitialsOf(string author)
+        {
+            var initials = author.Split([' ', '.', '-', '_'], StringSplitOptions.RemoveEmptyEntries)
+                .Where(part => char.IsLetter(part[0]))
+                .Select(part => char.ToUpperInvariant(part[0]))
+                .Take(3);
+            string text = new([.. initials]);
+            return text.Length > 0 ? text : "PDF";
+        }
     }
 
     // ---- page ----
 
+    /// <summary>
+    /// A table found on the page, and how to build it once its place in the flow is reached.
+    /// <see cref="Claims"/> decides which paragraphs it swallows, which is the only way text can be lost:
+    /// a paragraph the table claims but does not hold would leave the document altogether.
+    /// </summary>
+    private sealed record TableCandidate(RectD Bounds, Func<DocxTable> Build, Func<Para, bool>? Claims = null)
+    {
+        public bool Owns(Para para) =>
+            Bounds.Contains(para.Bounds.Center) && (Claims is null || Claims(para));
+    }
+
     private static List<DocxBlock> ComposePage(
         PageContent page, PageExtras extras, DocumentProfile profile,
-        ILookup<int, (double Y, int Depth, string Title)> headings, ExportOptions options)
+        ILookup<int, (double Y, int Depth, string Title)> headings, ExportOptions options, CommentSink comments)
     {
+        var tags = options.UseTags ? TagIndex.Build(page) : TagIndex.Empty;
         var lines = ReadLines(page, profile, options);
         var blocks = new List<DocxBlock>();
 
         var paragraphs = new List<Para>();
-        foreach (var (column, columnLines) in SplitIntoColumns(lines, profile))
+        var columns = SplitIntoColumns(lines, profile);
+        foreach (var (column, columnLines) in columns)
             paragraphs.AddRange(GroupParagraphs(columnLines, column, page));
 
+        if (!tags.IsEmpty) paragraphs = ApplyTags(paragraphs, tags, profile, options);
         if (options.Lists) MarkLists(paragraphs);
         if (options.Headings) MarkHeadings(paragraphs, profile, headings, page.PageIndex);
 
-        var grids = options.Tables ? TableBuilder.Find(page.Rules, profile.GlyphHeight) : [];
+        var tables = FindTables(page, extras, profile, options, tags, columns);
         var emitted = new HashSet<int>();
+        var placed = new List<(Para Para, int Block)>(paragraphs.Count);
 
         double previousBottom = double.NaN;
         foreach (var para in paragraphs)
         {
-            int table = grids.FindIndex(g => g.Bounds.Contains(para.Bounds.Center));
+            int table = tables.FindIndex(t => t.Owns(para));
             if (table >= 0)
             {
                 // The text of the table is rebuilt from the page rather than from these paragraphs: a row
                 // of cells is one visual line, so it has to be cut apart by position, not by line.
-                if (emitted.Add(table)) blocks.Add(BuildTable(grids[table], page, extras, profile, options));
+                if (emitted.Add(table)) blocks.Add(tables[table].Build());
                 continue;
             }
 
+            placed.Add((para, blocks.Count));
             blocks.Add(BuildParagraph(para, page, extras, profile, options, previousBottom));
             previousBottom = para.Bounds.Bottom;
         }
 
-        if (options.Images && page.Images.Count > 0) InsertImages(blocks, page, paragraphs, profile);
+        // A table no paragraph sits inside has nothing to hang off and would be dropped — unless it is
+        // empty, in which case there is nothing to lose and a stray grid would only be noise.
+        for (int i = 0; i < tables.Count; i++)
+        {
+            if (!emitted.Add(i)) continue;
+            var table = tables[i].Build();
+            if (table.Rows.SelectMany(r => r.Cells).Any(c => c.Blocks.Count > 0)) blocks.Add(table);
+        }
+
+        if (options.Annotations) AttachComments(blocks, placed, extras, comments);
+        if (options.Images && page.Images.Count > 0) InsertImages(blocks, page, paragraphs, profile, tags, options);
         return blocks;
+    }
+
+    /// <summary>
+    /// The tables on a page, in the order they are trusted: the grid a PDF actually draws first, then what
+    /// a tagged file says is a table, and only then — and only when asked — what the alignment suggests.
+    /// </summary>
+    private static List<TableCandidate> FindTables(
+        PageContent page, PageExtras extras, DocumentProfile profile, ExportOptions options,
+        TagIndex tags, List<(RectD Column, List<Line> Lines)> columns)
+    {
+        var candidates = new List<TableCandidate>();
+        if (!options.Tables) return candidates;
+
+        foreach (var grid in TableBuilder.Find(page.Rules, profile.GlyphHeight))
+            candidates.Add(new TableCandidate(grid.Bounds, () => BuildTable(grid, page, extras, profile, options)));
+
+        foreach (var table in tags.Tables)
+        {
+            if (Overlaps(candidates, table.Bounds)) continue;
+
+            // A tagged table holds exactly the characters its cells name. A line that merely sits inside
+            // its bounds — a caption the file forgot to tag, a note in a margin — belongs to neither cell
+            // and stays a paragraph, because a table that swallowed it would swallow it for good.
+            var claimed = table.Rows.SelectMany(r => r.Cells).SelectMany(c => c.Ranges).ToList();
+            candidates.Add(new TableCandidate(
+                table.Bounds.Inflate(0.004, 0.004),
+                () => BuildTaggedTable(table, page, extras, profile, options),
+                para => para.Ranges.Any(r => claimed.Any(c => c.Start < r.End && c.End > r.Start))));
+        }
+
+        if (options.UnruledTables)
+        {
+            foreach (var (column, lines) in columns)
+            {
+                var spans = lines
+                    .Select(l => new UnruledTableBuilder.LineSpan(l.Start, l.End, l.Bounds))
+                    .ToList();
+                foreach (var grid in UnruledTableBuilder.Find(page, spans, column, profile.GlyphHeight))
+                {
+                    if (Overlaps(candidates, grid.Bounds)) continue;
+                    candidates.Add(new TableCandidate(grid.Bounds,
+                        () => BuildTable(grid, page, extras, profile, options, borders: false)));
+                }
+            }
+        }
+
+        return candidates;
+
+        static bool Overlaps(List<TableCandidate> candidates, RectD bounds) =>
+            candidates.Any(c => c.Bounds.Intersects(bounds));
     }
 
     /// <summary>Visual lines with their text and dominant style, minus blanks and running heads.</summary>
@@ -332,6 +477,11 @@ public static class ContentComposer
         /// <summary>Characters of the first line taken by a list marker, which the runs skip.</summary>
         public int MarkerLength { get; set; }
 
+        /// <summary>The PDF's own tags settled what this paragraph is, so no heuristic may overrule it.</summary>
+        public bool Tagged { get; set; }
+
+        public IReadOnlyList<(int Start, int End)> Ranges => [.. Lines.Select(l => (l.Start, l.End))];
+
         public double Size => Lines.Count == 0 ? 11 : Lines[0].Style.SizePoints;
         public bool Bold => Lines.Count > 0 && Lines.All(l => l.AllBold);
         public string Text => string.Join(" ", Lines.Select(l => l.Text));
@@ -440,6 +590,81 @@ public static class ContentComposer
         return DocxAlignment.Left;
     }
 
+    // ---- tags ----
+
+    /// <summary>
+    /// Settles what the tags are certain about — headings and their level, list items and their depth,
+    /// captions — before any heuristic runs, and marks those paragraphs so none of them overrules it.
+    /// Appearance is never taken from the tags: a tagged file will mark a run as <c>/P</c> and draw it
+    /// bold at 18 pt, so size, weight and colour still come from the glyphs.
+    /// </summary>
+    private static List<Para> ApplyTags(
+        List<Para> paragraphs, TagIndex tags, DocumentProfile profile, ExportOptions options)
+    {
+        // Two paragraphs the geometry split that belong to one tagged element are one paragraph. The gap
+        // still has to be a paragraph's worth: a file that wraps a whole page in a single /P — and they
+        // exist — must not have the page run together into one block of text.
+        var merged = new List<Para>(paragraphs.Count);
+        int previousBlock = -1;
+
+        foreach (var para in paragraphs)
+        {
+            int block = tags.BlockOf(para.Ranges);
+            if (block >= 0 && block == previousBlock && merged.Count > 0 &&
+                merged[^1].Column == para.Column &&
+                para.Bounds.Top - merged[^1].Bounds.Bottom < profile.GlyphHeight * 2.5)
+            {
+                var target = merged[^1];
+                target.Lines.AddRange(para.Lines);
+                target.Bounds = target.Bounds.Union(para.Bounds);
+                target.Alignment = DetectAlignment(target);
+                continue;
+            }
+
+            merged.Add(para);
+            previousBlock = block;
+        }
+
+        foreach (var para in merged)
+        {
+            var info = tags.Classify(para.Ranges);
+            switch (info.Kind)
+            {
+                case TagKind.Heading when options.Headings:
+                    para.Style = LevelToStyle(info.Level);
+                    para.Tagged = true;
+                    break;
+
+                case TagKind.Caption:
+                    para.Style = DocxParagraphStyle.Caption;
+                    para.Tagged = true;
+                    break;
+
+                case TagKind.ListItem when options.Lists:
+                    string text = para.Lines.Count > 0 ? para.Lines[0].Text : string.Empty;
+                    var marker = BulletMarker.Match(text) is { Success: true } bullet ? bullet
+                        : AmbiguousBullet.Match(text) is { Success: true } dash ? dash
+                        : NumberMarker.Match(text);
+
+                    // The label is drawn as part of the line, so it has to come out of the text: left in,
+                    // Word numbers the item and the PDF's own marker sits next to it.
+                    para.List = info.Ordered || (marker.Success && NumberMarker.IsMatch(text))
+                        ? DocxListKind.Number
+                        : DocxListKind.Bullet;
+                    para.MarkerLength = marker.Success ? marker.Length : 0;
+                    para.ListLevel = info.Level;
+                    para.Tagged = true;
+                    break;
+
+                case TagKind.Paragraph:
+                    para.Tagged = true;
+                    break;
+            }
+        }
+
+        return merged;
+    }
+
     // ---- headings and lists ----
 
     private static void MarkHeadings(
@@ -448,7 +673,7 @@ public static class ContentComposer
     {
         foreach (var para in paragraphs)
         {
-            if (para.List != DocxListKind.None) continue;
+            if (para.List != DocxListKind.None || para.Tagged) continue;
 
             // A bookmark pointing into this paragraph is not a guess: it names the heading and its depth.
             foreach (var (y, depth, title) in headings[pageIndex])
@@ -513,6 +738,7 @@ public static class ContentComposer
 
         for (int i = 0; i < paragraphs.Count; i++)
         {
+            if (paragraphs[i].Tagged) continue;
             string text = paragraphs[i].Lines.Count > 0 ? paragraphs[i].Lines[0].Text : string.Empty;
             if (BulletMarker.Match(text) is { Success: true } bullet)
             {
@@ -758,10 +984,11 @@ public static class ContentComposer
     // ---- tables ----
 
     private static DocxTable BuildTable(
-        TableGrid grid, PageContent page, PageExtras extras, DocumentProfile profile, ExportOptions options)
+        TableGrid grid, PageContent page, PageExtras extras, DocumentProfile profile, ExportOptions options,
+        bool borders = true)
     {
         double snap = TableBuilder.SnapFor(profile.GlyphHeight);
-        var rules = page.Rules;
+        var rules = borders ? page.Rules : [];
 
         var widths = new List<int>(grid.ColumnCount);
         for (int c = 0; c < grid.ColumnCount; c++)
@@ -776,43 +1003,220 @@ public static class ContentComposer
             {
                 // A missing interior edge means the cell runs on into the next column.
                 int span = 1;
-                while (c + span < grid.ColumnCount &&
+                while (borders && c + span < grid.ColumnCount &&
                        !TableBuilder.HasVerticalEdge(grid, rules, r, c + span, snap))
                     span++;
 
                 var area = new RectD(grid.Columns[c], grid.Rows[r], grid.Columns[c + span], grid.Rows[r + 1]);
-                bool continues = r > 0 && !TableBuilder.HasHorizontalEdge(grid, rules, r, c, snap);
-                bool startsMerge = !continues && r + 1 < grid.RowCount &&
+                bool continues = borders && r > 0 && !TableBuilder.HasHorizontalEdge(grid, rules, r, c, snap);
+                bool startsMerge = borders && !continues && r + 1 < grid.RowCount &&
                                    !TableBuilder.HasHorizontalEdge(grid, rules, r + 1, c, snap);
 
                 cells.Add(new DocxCell(continues ? [] : CellBlocks(area, page, extras, profile, options))
                 {
                     ColumnSpan = span,
                     VerticalMerge = continues ? 2 : startsMerge ? 1 : 0,
+                    Shading = ShadingFor(area, grid.Bounds, page),
                 });
                 c += span;
             }
 
             var row = new DocxRow(cells);
             // A first row set entirely in bold is a header row, and Word should repeat it across a page break.
-            if (r == 0 && cells.Count > 1 && cells.All(IsBold)) row = row with { IsHeader = true };
+            if (r == 0 && cells.Count > 1 && cells.All(IsBoldCell)) row = row with { IsHeader = true };
             rows.Add(row);
         }
 
-        return new DocxTable(rows, widths);
+        return new DocxTable(rows, widths) { HasBorders = borders };
+    }
 
-        static bool IsBold(DocxCell cell)
+    /// <summary>
+    /// Rebuilds a table the PDF's own tags describe: the rows, the cells and their spans are read rather
+    /// than inferred, which is the one case where a table without a single drawn line is not a guess.
+    /// </summary>
+    private static DocxTable BuildTaggedTable(
+        TaggedTable table, PageContent page, PageExtras extras, DocumentProfile profile, ExportOptions options)
+    {
+        // Cells are laid out the way a browser lays out a table: each takes the next free slot of its row,
+        // and a row-spanning cell keeps the slots under it occupied.
+        var occupied = new HashSet<(int Row, int Column)>();
+        var placed = new List<List<(TaggedCell Cell, int Column)>>(table.Rows.Count);
+        int columnCount = 0;
+
+        for (int r = 0; r < table.Rows.Count; r++)
         {
-            var runs = cell.Blocks.OfType<DocxParagraph>().SelectMany(p => p.Runs)
-                .Where(r => r.Text.Trim().Length > 0).ToList();
-            return runs.Count > 0 && runs.All(r => r.Style.Bold);
+            var row = new List<(TaggedCell, int)>();
+            int column = 0;
+            foreach (var cell in table.Rows[r].Cells)
+            {
+                while (occupied.Contains((r, column))) column++;
+                row.Add((cell, column));
+                for (int dr = 0; dr < cell.RowSpan; dr++)
+                    for (int dc = 0; dc < cell.ColumnSpan; dc++)
+                        occupied.Add((r + dr, column + dc));
+                column += cell.ColumnSpan;
+                columnCount = Math.Max(columnCount, column);
+            }
+            placed.Add(row);
+        }
+        if (columnCount == 0) return new DocxTable([], []);
+
+        var widths = MeasureColumns(placed, columnCount, table.Bounds, page.Size.Width);
+        var rows = new List<DocxRow>(placed.Count);
+
+        for (int r = 0; r < placed.Count; r++)
+        {
+            var cells = new List<DocxCell>(placed[r].Count);
+            int expected = 0;
+            foreach (var (cell, column) in placed[r])
+            {
+                // A slot covered by a cell from an earlier row is the continuation of that merge.
+                while (expected < column)
+                {
+                    cells.Add(new DocxCell([]) { VerticalMerge = 2 });
+                    expected++;
+                }
+
+                cells.Add(new DocxCell(CellBlocks(cell.Ranges, cell.Bounds, page, extras, profile, options))
+                {
+                    ColumnSpan = cell.ColumnSpan,
+                    VerticalMerge = cell.RowSpan > 1 ? 1 : 0,
+                    Shading = ShadingFor(cell.Bounds, table.Bounds, page),
+                });
+                expected = column + cell.ColumnSpan;
+            }
+
+            var built = new DocxRow(cells);
+            bool header = placed[r].Count > 0 && placed[r].All(c => c.Cell.IsHeader);
+            if (header || (r == 0 && cells.Count > 1 && cells.All(IsBoldCell))) built = built with { IsHeader = true };
+            rows.Add(built);
+        }
+
+        // A tagged table is a table whether or not it was ever drawn, so the borders follow the PDF: it
+        // gets them if it drew them, and Word's own grid lines are not invented for one that did not.
+        bool drawn = page.Rules.Any(r => table.Bounds.Inflate(0.01, 0.01).Contains(r.Bounds.Center));
+        return new DocxTable(rows, widths) { HasBorders = drawn };
+    }
+
+    /// <summary>
+    /// Column widths from where the cells of each column start, not from how wide their text happens to
+    /// be: a column holding the word "Year" is as wide as the space the PDF gave it, and a table measured
+    /// from its text alone comes out as a huddle of narrow columns in the middle of the page.
+    /// </summary>
+    private static List<int> MeasureColumns(
+        List<List<(TaggedCell Cell, int Column)>> placed, int columnCount, RectD bounds, double pageWidth)
+    {
+        var lefts = new double[columnCount];
+        var text = new double[columnCount];
+        Array.Fill(lefts, double.NaN);
+
+        foreach (var row in placed)
+        {
+            foreach (var (cell, column) in row)
+            {
+                if (cell.Bounds.IsEmpty || column >= columnCount) continue;
+                lefts[column] = double.IsNaN(lefts[column]) ? cell.Bounds.Left : Math.Min(lefts[column], cell.Bounds.Left);
+                if (cell.ColumnSpan == 1) text[column] = Math.Max(text[column], cell.Bounds.Width);
+            }
+        }
+
+        // A column nothing starts in takes the width of its widest text, or an equal share as a last resort.
+        double fallback = bounds.Width / columnCount;
+        var widths = new List<int>(columnCount);
+        for (int c = 0; c < columnCount; c++)
+        {
+            double next = c + 1 < columnCount ? NextLeft(lefts, c + 1) : bounds.Right;
+            double width = double.IsNaN(lefts[c]) || double.IsNaN(next) || next <= lefts[c]
+                ? (text[c] > 0 ? text[c] : fallback)
+                : next - lefts[c];
+            widths.Add(Math.Max(1, PointsToTwips(width * pageWidth)));
+        }
+        return widths;
+
+        static double NextLeft(double[] lefts, int from)
+        {
+            for (int i = from; i < lefts.Length; i++)
+                if (!double.IsNaN(lefts[i])) return lefts[i];
+            return double.NaN;
         }
     }
 
-    private static List<DocxBlock> CellBlocks(
-        RectD area, PageContent page, PageExtras extras, DocumentProfile profile, ExportOptions options)
+    private static bool IsBoldCell(DocxCell cell)
     {
-        var lines = LinesInside(page, area);
+        var runs = cell.Blocks.OfType<DocxParagraph>().SelectMany(p => p.Runs)
+            .Where(r => r.Text.Trim().Length > 0).ToList();
+        return runs.Count > 0 && runs.All(r => r.Style.Bold);
+    }
+
+    /// <summary>
+    /// The fill behind a cell, when the PDF painted one. A shaded header row is one wide rectangle behind
+    /// three cells, so a fill wider than the cell still counts — but one covering the whole table is the
+    /// table's own background, and painting every cell with it would lose the distinction it was making.
+    /// </summary>
+    private static uint? ShadingFor(RectD cell, RectD table, PageContent page)
+    {
+        if (page.Fills.Count == 0 || cell.IsEmpty) return null;
+
+        double area = cell.Width * cell.Height;
+        double tableArea = table.IsEmpty ? 0 : table.Width * table.Height;
+        uint? best = null;
+        double bestArea = double.MaxValue;
+
+        foreach (var fill in page.Fills)
+        {
+            var overlap = fill.Bounds.Intersect(cell);
+            if (overlap.IsEmpty) continue;
+            if (overlap.Width * overlap.Height < area * 0.7) continue;      // it has to cover the cell
+
+            double fillArea = fill.Bounds.Width * fill.Bounds.Height;
+            if (tableArea > 0 && fillArea > tableArea * 0.75) continue;     // and not the whole table
+            if (fillArea >= bestArea) continue;
+
+            bestArea = fillArea;
+            best = fill.Color;
+        }
+
+        // White is what Word draws anyway, and writing it in would fight a user's own table style.
+        return best is 0xFFFFFF ? null : best;
+    }
+
+    private static List<DocxBlock> CellBlocks(
+        RectD area, PageContent page, PageExtras extras, DocumentProfile profile, ExportOptions options) =>
+        Compose(LinesInside(page, area), area, page, extras, profile, options);
+
+    /// <summary>
+    /// The contents of a cell a tag describes. Its characters are known exactly, so they are cut by range
+    /// rather than by position — which is what makes a tagged table exact where a ruled one is measured.
+    /// </summary>
+    private static List<DocxBlock> CellBlocks(
+        IReadOnlyList<(int Start, int End)> ranges, RectD area, PageContent page, PageExtras extras,
+        DocumentProfile profile, ExportOptions options)
+    {
+        var lines = new List<Line>();
+        foreach (var visual in page.Text.Lines)
+        {
+            foreach (var (start, end) in ranges)
+            {
+                int from = Math.Max(visual.Start, start), to = Math.Min(visual.End, end);
+                if (to <= from) continue;
+                if (Line.FromRange(page, from, to) is { } line) lines.Add(line);
+            }
+        }
+
+        lines.Sort((a, b) =>
+        {
+            int byTop = a.Bounds.Top.CompareTo(b.Bounds.Top);
+            return byTop != 0 ? byTop : a.Bounds.Left.CompareTo(b.Bounds.Left);
+        });
+
+        var bounds = area.IsEmpty ? Bounds(lines) : area;
+        return Compose(lines, bounds, page, extras, profile, options);
+    }
+
+    private static List<DocxBlock> Compose(
+        List<Line> lines, RectD area, PageContent page, PageExtras extras,
+        DocumentProfile profile, ExportOptions options)
+    {
         if (lines.Count == 0) return [];
 
         var blocks = new List<DocxBlock>();
@@ -866,10 +1270,14 @@ public static class ContentComposer
 
     // ---- images ----
 
-    private static void InsertImages(List<DocxBlock> blocks, PageContent page, List<Para> paragraphs, DocumentProfile profile)
+    private static void InsertImages(
+        List<DocxBlock> blocks, PageContent page, List<Para> paragraphs, DocumentProfile profile,
+        TagIndex tags, ExportOptions options)
     {
         foreach (var image in page.Images)
         {
+            if (image.IsDrawing && !options.Drawings) continue;
+
             double widthPoints = image.Bounds.Width * page.Size.Width;
             double heightPoints = image.Bounds.Height * page.Size.Height;
             if (widthPoints < 4 || heightPoints < 4) continue;
@@ -887,11 +1295,57 @@ public static class ContentComposer
                 Alignment = DocxAlignment.Center,
                 SpaceBeforeTwips = 120,
                 SpaceAfterTwips = 120,
+                // A tagged PDF names its figures, and that description is the only thing in the document
+                // a screen reader can use once the picture has been carried across.
+                AltText = tags.AltTextFor(image.MarkedContentId),
             };
 
             int at = paragraphs.FindIndex(p => p.Bounds.Top >= image.Bounds.Top);
             if (at < 0 || at >= blocks.Count) blocks.Add(picture);
             else blocks.Insert(at, picture);
+        }
+    }
+
+    // ---- comments ----
+
+    /// <summary>
+    /// Anchors the page's notes to the paragraphs they sit against. A PDF sticky note is a comment in
+    /// everything but name, and its icon is placed beside the text rather than in it, so the anchor is the
+    /// nearest paragraph rather than the one underneath. A note left in the body would interrupt the text
+    /// at the point it was written, and a note dropped is content lost without a word.
+    /// </summary>
+    private static void AttachComments(
+        List<DocxBlock> blocks, List<(Para Para, int Block)> placed, PageExtras extras, CommentSink comments)
+    {
+        if (placed.Count == 0) return;
+
+        foreach (var annotation in extras.Annotations)
+        {
+            if (annotation.Kind is not (AnnotationKind.Note or AnnotationKind.Highlight or
+                AnnotationKind.Underline or AnnotationKind.StrikeOut or AnnotationKind.Squiggly)) continue;
+
+            string text = annotation.Contents.Trim();
+            if (text.Length == 0) continue;
+
+            var point = annotation.Bounds.IsEmpty
+                ? (annotation.Quads.Count > 0 ? annotation.Quads[0].Center : default)
+                : annotation.Bounds.Center;
+
+            int target = -1;
+            double best = double.MaxValue;
+            foreach (var (para, block) in placed)
+            {
+                if (blocks[block] is not DocxParagraph) continue;
+                double distance = para.Bounds.DistanceTo(point);
+                if (distance >= best) continue;
+                best = distance;
+                target = block;
+            }
+            if (target < 0) continue;
+
+            int id = comments.Add(annotation.Author, text, null);
+            var paragraph = (DocxParagraph)blocks[target];
+            blocks[target] = paragraph with { CommentIds = [.. paragraph.CommentIds, id] };
         }
     }
 

@@ -347,7 +347,11 @@ public sealed unsafe partial class PdfiumDocument : IPdfDocument, IPageContentSo
                     if (bounds.IsEmpty && quads.Count > 0) bounds = quads.Aggregate(RectD.Empty, (a, b) => a.Union(b));
 
                     string contents = ReadWideString((buf, len) => FPDFAnnot_GetStringValue(annot, (byte*)Utf8Z("Contents"), buf, len));
-                    result.Add(new PdfAnnotation(pageIndex, i, kind, bounds, quads, ReadAnnotationColor(annot, kind), contents));
+                    string author = ReadWideString((buf, len) => FPDFAnnot_GetStringValue(annot, (byte*)Utf8Z("T"), buf, len));
+                    result.Add(new PdfAnnotation(pageIndex, i, kind, bounds, quads, ReadAnnotationColor(annot, kind), contents)
+                    {
+                        Author = author,
+                    });
                 }
                 finally
                 {
