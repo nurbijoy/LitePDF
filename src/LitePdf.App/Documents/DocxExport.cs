@@ -3,7 +3,6 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using LitePdf.Core;
 using LitePdf.Core.Export;
-using LitePdf.Core.Text;
 
 namespace LitePdf.App.Documents;
 
@@ -28,10 +27,11 @@ public sealed class WpfImageEncoder : IImageEncoder
 public sealed record DocxExportSettings
 {
     public IReadOnlyList<int> Pages { get; init; } = [];
-    public ExportOptions Options { get; init; } = ExportOptions.Default;
-
-    /// <summary>Recognize pages that have no text layer, so a scan converts to text rather than a picture.</summary>
-    public bool RecognizeScans { get; init; }
+    public ExportOptions Options { get; init; } = ExportOptions.Default with
+    {
+        PreserveLineBreaks = true,
+        PreservePageBreaks = true,
+    };
 }
 
 /// <summary>
@@ -42,15 +42,14 @@ public sealed record DocxExportSettings
 /// </summary>
 public static class DocxExport
 {
-    /// <summary>A page with neither text nor images is rendered at this resolution so nothing is lost.</summary>
-    private const double FallbackPageDpi = 150;
-
     public static async Task<int> ExportAsync(
         DocumentSession session, string targetPath, DocxExportSettings settings,
         IProgress<(double Fraction, string Text)>? progress, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(session);
         ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
+        if (!session.IsPdf) throw new NotSupportedException("Word conversion supports text PDFs only.");
+        if (settings.Pages.Count == 0) throw new ArgumentException("Select at least one page.", nameof(settings));
 
         var pages = new List<PageContent>(settings.Pages.Count);
         var extras = new List<PageExtras>(settings.Pages.Count);
@@ -71,6 +70,8 @@ public static class DocxExport
         ct.ThrowIfCancellationRequested();
         progress?.Report((0.92, "Building the document"));
 
+        TextPdfExport.Validate(pages);
+
         var outline = settings.Options.Headings
             ? await session.Document.GetOutlineAsync(ct)
             : [];
@@ -88,7 +89,8 @@ public static class DocxExport
         int blocks = await Task.Run(() =>
         {
             var document = ContentComposer.Compose(pages, extras, outline, settings.Options, info);
-            WritePackage(targetPath, document, encoder);
+            ct.ThrowIfCancellationRequested();
+            WritePackage(targetPath, document, encoder, ct);
             return document.Sections.Sum(s => s.Blocks.Count);
         }, ct);
 
@@ -151,82 +153,7 @@ public static class DocxExport
             ? await source.GetPageContentAsync(index, RenderPriority.Background, settings.Options.ToPageRequest(), ct)
             : PageContent.Empty(index, size);
 
-        if (content.Text.VisibleCharCount < DocumentSession.MinTextChars && settings.RecognizeScans)
-        {
-            var recognized = await RecognizeAsync(session, index, ct);
-            if (recognized is { VisibleCharCount: > 0 })
-                content = content with { Text = recognized, Spans = SpansForRecognizedText(recognized, size) };
-        }
-
-        // Nothing readable and nothing drawn that we could lift out: keep the page as a picture rather than
-        // writing an empty page. Losing a page is the one outcome the export must never produce.
-        if (content.Text.VisibleCharCount == 0 && content.Images.Count == 0)
-        {
-            var image = await RenderWholePageAsync(session, index, ct);
-            if (image is not null) content = content with { Images = [image] };
-        }
-
         return content;
-    }
-
-    private static async Task<PageText?> RecognizeAsync(DocumentSession session, int index, CancellationToken ct)
-    {
-        try
-        {
-            return await session.RecognizePageAsync(index, RenderPriority.Background, ct);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            Infrastructure.Log.Error(ex, $"Recognizing page {index + 1} for the Word export");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Recognized text carries no font, so a size is estimated from how tall the lines are. Without this
-    /// every scanned page would come out at the default size whatever the original was set in.
-    /// </summary>
-    private static IReadOnlyList<StyledSpan> SpansForRecognizedText(PageText text, PageSize size)
-    {
-        if (text.Length == 0) return [];
-
-        var heights = new List<double>();
-        foreach (var line in text.Lines)
-            if (!line.Bounds.IsEmpty) heights.Add(line.Bounds.Height * size.Height);
-
-        double points = 11;
-        if (heights.Count > 0)
-        {
-            heights.Sort();
-            points = Math.Clamp(heights[heights.Count / 2] * 0.78, 6, 48);
-        }
-
-        var style = new TextStyle("Calibri", Math.Round(points, 1), false, false, 0x000000);
-        return [new StyledSpan(0, text.Length, style)];
-    }
-
-    private static async Task<PlacedImage?> RenderWholePageAsync(DocumentSession session, int index, CancellationToken ct)
-    {
-        try
-        {
-            var full = new RectD(0, 0, 1, 1);
-            var bitmap = await session.RenderRegionAsync(index, full, FallbackPageDpi, 0, ct);
-            var bits = new ImageBits(bitmap.Width, bitmap.Height, bitmap.Pixels);
-            return PlacedImage.FromBits(full, bits);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            Infrastructure.Log.Error(ex, $"Rendering page {index + 1} for the Word export");
-            return null;
-        }
     }
 
     private static async Task<PageExtras> ReadExtrasAsync(
@@ -263,7 +190,7 @@ public static class DocxExport
     }
 
     /// <summary>Writes through a temp file in the target folder, so a failure never truncates an existing one.</summary>
-    private static void WritePackage(string targetPath, DocxDocument document, IImageEncoder encoder)
+    private static void WritePackage(string targetPath, DocxDocument document, IImageEncoder encoder, CancellationToken ct)
     {
         string directory = Path.GetDirectoryName(Path.GetFullPath(targetPath)) ?? ".";
         Directory.CreateDirectory(directory);
@@ -274,6 +201,7 @@ public static class DocxExport
             using (var stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
                 DocxWriter.Write(stream, document, encoder);
 
+            ct.ThrowIfCancellationRequested();
             if (File.Exists(targetPath)) File.Replace(temp, targetPath, null);
             else File.Move(temp, targetPath);
         }

@@ -32,6 +32,12 @@ public sealed record ExportOptions
     /// <summary>Joins a paragraph that runs from the foot of one page to the head of the next.</summary>
     public bool JoinAcrossPages { get; init; } = true;
 
+    /// <summary>Keep source line endings inside editable paragraphs instead of reflowing them.</summary>
+    public bool PreserveLineBreaks { get; init; }
+
+    /// <summary>Start each source page on a new Word page, including gaps in a selected page range.</summary>
+    public bool PreservePageBreaks { get; init; }
+
     public static ExportOptions Default { get; } = new();
 
     /// <summary>What the reader has to go and fetch for these options; the costly parts are opt-in.</summary>
@@ -72,6 +78,9 @@ public static class ContentComposer
 
     /// <summary>Vertical gap, against the median for the block, that starts a new paragraph.</summary>
     private const double ParagraphGapRatio = 1.45;
+
+    /// <summary>Points left under a full-height picture for the paragraph mark that follows it.</summary>
+    private const double PictureHeadroom = 14;
 
     public static DocxDocument Compose(
         IReadOnlyList<PageContent> pages,
@@ -175,7 +184,7 @@ public static class ContentComposer
         var blocks = new List<DocxBlock>();
 
         var paragraphs = new List<Para>();
-        var columns = SplitIntoColumns(lines, profile);
+        var columns = SplitIntoColumns(lines, profile, page, tags.Tables.Count > 0 || options.UnruledTables);
         foreach (var (column, columnLines) in columns)
             paragraphs.AddRange(GroupParagraphs(columnLines, column, page));
 
@@ -282,6 +291,11 @@ public static class ContentComposer
 
             if (options.HeadersFooters && profile.IsRunningHead(visual.Bounds, raw)) continue;
 
+            // Where a recognized page found a picture rather than words, the layout pass leaves a marker.
+            // It stands for something the export carries as a picture, so it must never be written out as
+            // the literal text "[Figure]".
+            if (text.Source == TextSource.Ocr && raw.AsSpan().Trim().Equals(OcrLayout.FigurePlaceholder, StringComparison.Ordinal)) continue;
+
             lines.Add(Line.Create(page, visual, raw));
         }
 
@@ -301,13 +315,27 @@ public static class ContentComposer
     /// other way round would treat every line of an ordinary single-column page as a spanning line, because
     /// on such a page the text area and the line are the same width.
     /// </summary>
-    private static List<(RectD Column, List<Line> Lines)> SplitIntoColumns(List<Line> lines, DocumentProfile profile)
+    private static List<(RectD Column, List<Line> Lines)> SplitIntoColumns(
+        List<Line> lines, DocumentProfile profile, PageContent page, bool hasTables)
     {
         var units = new List<(RectD, List<Line>)>();
         if (lines.Count == 0) return units;
 
         RectD area = Bounds(lines);
         var bands = DetectColumnBands(lines, area, profile.GlyphHeight);
+
+        // PDFium can place both columns in one text line when their baselines match. Try splitting wide
+        // whitespace corridors, but accept the split only when repeated prose establishes actual columns.
+        if (bands.Count < 2 && !hasTables && page.Rules.Count == 0)
+        {
+            var split = lines.SelectMany(line => SplitColumnLine(line, page)).ToList();
+            var candidateBands = DetectColumnBands(split, area, profile.GlyphHeight);
+            if (candidateBands.Count >= 2)
+            {
+                lines = split.OrderBy(l => l.Bounds.Top).ThenBy(l => l.Bounds.Left).ToList();
+                bands = candidateBands;
+            }
+        }
 
         if (bands.Count < 2)
         {
@@ -356,6 +384,26 @@ public static class ContentComposer
         FlushSpanning();
 
         return units;
+    }
+
+    private static IEnumerable<Line> SplitColumnLine(Line line, PageContent page)
+    {
+        var pieces = new List<Line>();
+        int start = line.Start;
+        RectD? previous = null;
+        double gap = Math.Max(0.025, line.Style.SizePoints * 2 / page.Size.Width);
+        for (int i = line.Start; i < line.End; i++)
+        {
+            if (char.IsWhiteSpace(page.Text.Text[i]) || !page.Text.TryGetBox(i, out var box)) continue;
+            if (previous is { } last && box.Left - last.Right > gap)
+            {
+                if (Line.FromRange(page, start, i) is { } piece) pieces.Add(piece);
+                start = i;
+            }
+            previous = box;
+        }
+        if (Line.FromRange(page, start, line.End) is { } tail) pieces.Add(tail);
+        return pieces.Count > 1 && pieces.All(p => p.Text.Length >= 20) ? pieces : [line];
     }
 
     /// <summary>
@@ -825,13 +873,17 @@ public static class ContentComposer
         return new DocxParagraph(runs)
         {
             Style = para.Style,
-            Alignment = para.Alignment,
+            Alignment = options.PreserveLineBreaks && para.Alignment == DocxAlignment.Justify
+                ? DocxAlignment.Left : para.Alignment,
             IndentTwips = Math.Max(0, indent),
             FirstLineTwips = firstLine,
             SpaceBeforeTwips = spaceBefore,
             LineSpacingTwips = lineSpacing,
+            ExplicitSpacing = options.PreserveLineBreaks,
             List = para.List,
             ListLevel = para.ListLevel,
+            ListMarker = para.List == DocxListKind.Number && para.MarkerLength > 0
+                ? para.Lines[0].Text[..para.MarkerLength].TrimEnd() : null,
         };
     }
 
@@ -869,7 +921,7 @@ public static class ContentComposer
             while (from < to && char.IsWhiteSpace(text[from])) from++;
 
             bool joinedByHyphen = false;
-            if (index < para.Lines.Count - 1 && to > from && IsSoftHyphenBreak(text, from, to, para.Lines[index + 1], page))
+            if (!options.PreserveLineBreaks && index < para.Lines.Count - 1 && to > from && IsSoftHyphenBreak(text, from, to, para.Lines[index + 1], page))
             {
                 to--;                 // drop the hyphen: the word continues on the next line
                 joinedByHyphen = true;
@@ -888,7 +940,13 @@ public static class ContentComposer
                 buffer.Append(c);
             }
 
-            if (index < para.Lines.Count - 1 && !joinedByHyphen && buffer.Length > 0)
+            if (options.PreserveLineBreaks && index < para.Lines.Count - 1)
+            {
+                buffer.Append('\n');
+            }
+            else if (index < para.Lines.Count - 1 && !joinedByHyphen && buffer.Length > 0 &&
+                !(buffer[^1] == '-' && to - from > 1 && char.IsLetter(text[to - 2]) &&
+                  char.IsLetter(para.Lines[index + 1].Text[0])))
             {
                 // Lines of one paragraph are joined with a single space, which is what reflowing needs.
                 if (buffer[^1] is not ' ') buffer.Append(' ');
@@ -964,12 +1022,12 @@ public static class ContentComposer
     }
 
     /// <summary>
-    /// A hyphen at the end of a line is a line break inside a word only when the next line continues it in
-    /// lower case. Before a capital or a digit it is a real hyphen and has to stay.
+    /// Only an explicit soft hyphen can safely be removed. Geometry cannot distinguish "understand-ing"
+    /// from a real compound such as "well-known"; deleting an ordinary hyphen changes the source text.
     /// </summary>
     private static bool IsSoftHyphenBreak(string text, int from, int to, Line next, PageContent page)
     {
-        if (to - from < 2 || text[to - 1] is not ('-' or '­')) return false;
+        if (to - from < 2 || text[to - 1] != '\u00AD') return false;
         if (!char.IsLetter(text[to - 2])) return false;
 
         for (int i = next.Start; i < next.End; i++)
@@ -1282,12 +1340,18 @@ public static class ContentComposer
             double heightPoints = image.Bounds.Height * page.Size.Height;
             if (widthPoints < 4 || heightPoints < 4) continue;
 
-            // Never wider than the text measure, or Word pushes it off the page.
+            // A picture has to fit the text area in both directions, not just across. One a single point
+            // taller than the page holds pushes itself onto a page of its own and the text that belongs
+            // beside it onto the next — which is how a scan becomes twice as many pages as it started with.
             double maxWidth = page.Size.Width - profile.Margins.Left - profile.Margins.Right;
-            if (maxWidth > 0 && widthPoints > maxWidth)
+            double maxHeight = page.Size.Height - profile.Margins.Top - profile.Margins.Bottom - PictureHeadroom;
+            double scale = Math.Min(
+                maxWidth > 0 ? maxWidth / widthPoints : 1,
+                maxHeight > 0 ? maxHeight / heightPoints : 1);
+            if (scale < 1)
             {
-                heightPoints *= maxWidth / widthPoints;
-                widthPoints = maxWidth;
+                widthPoints *= scale;
+                heightPoints *= scale;
             }
 
             var picture = new DocxPicture(image, widthPoints, heightPoints)
@@ -1360,18 +1424,25 @@ public static class ContentComposer
 
         var blocks = new List<DocxBlock>();
         var size = composed[0].Page.Size;
+        int previousPage = -2;
 
         foreach (var (page, pageBlocks) in composed)
         {
+            if (options.PreservePageBreaks && pageBlocks.Count == 0) pageBlocks.Add(DocxParagraph.Empty);
             bool sizeChanged = Math.Abs(page.Size.Width - size.Width) > 1 || Math.Abs(page.Size.Height - size.Height) > 1;
-            if (sizeChanged && blocks.Count > 0)
+            bool needsSection = options.PreservePageBreaks && pageBlocks.FirstOrDefault() is not DocxParagraph;
+            if ((sizeChanged || needsSection) && blocks.Count > 0)
             {
                 sections.Add(MakeSection(size, blocks, profile, options));
                 blocks = [];
                 size = page.Size;
             }
 
-            if (options.JoinAcrossPages && blocks.Count > 0 && pageBlocks.Count > 0 &&
+            if (options.PreservePageBreaks && blocks.Count > 0 && pageBlocks[0] is DocxParagraph first)
+                pageBlocks[0] = first with { PageBreakBefore = true };
+
+            if (!options.PreservePageBreaks && options.JoinAcrossPages && page.PageIndex == previousPage + 1 &&
+                blocks.Count > 0 && pageBlocks.Count > 0 &&
                 blocks[^1] is DocxParagraph tail && pageBlocks[0] is DocxParagraph head &&
                 ContinuesAcrossPages(tail, head))
             {
@@ -1382,6 +1453,7 @@ public static class ContentComposer
             {
                 blocks.AddRange(pageBlocks);
             }
+            previousPage = page.PageIndex;
         }
 
         sections.Add(MakeSection(size, blocks, profile, options));

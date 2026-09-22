@@ -1,5 +1,11 @@
 # DOCX export design
 
+**Current scope (2026-09-22 quality fixes):** the app converts text PDFs only. Scanned/image-only pages,
+including invisible OCR layers, are rejected without creating or replacing output. OCR conversion and
+whole-page image fallback are disabled. Pictures in text PDFs remain supported. The app preserves source
+line endings and page boundaries while keeping editable text, lists, tables, links and comments.
+The reflow pipeline described below remains available in Core; historical scan plans below are deferred.
+
 Design for "Convert to Word" (`T-F6`, finished by `T-F7`). Status: **every phase implemented**
 (2026-09-22); see `TASKS.md` for what was verified and what is still missing, and `docs/BLUEPRINT.md`
 §5c/5d for the architecture as built. This file keeps the reasoning behind the design.
@@ -53,8 +59,8 @@ say nothing true about what a run looks like.
 > cost of the choice is that reading order still comes from the geometry rather than from the tag order,
 > which differ only where a page is set in an unusual way.
 
-The scan path is nearly free: `OcrLayout` already returns a `PageText`, the same type PDF text produces, so
-`ContentComposer` consumes it unchanged. Recognition quality is then the only difference.
+The scan path is deferred. Shared text types alone do not establish OCR conversion quality; the Word
+export service neither calls OCR nor turns unsupported pages into full-page pictures.
 
 ## 3. Layering
 

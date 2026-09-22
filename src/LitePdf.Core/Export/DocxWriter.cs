@@ -58,7 +58,7 @@ public static class DocxWriter
         WritePart(zip, "docProps/core.xml", w => WriteCoreProps(w, document));
         WritePart(zip, "docProps/app.xml", WriteAppProps);
         WritePart(zip, "word/styles.xml", w => WriteStyles(w, document));
-        WritePart(zip, "word/numbering.xml", WriteNumbering);
+        WritePart(zip, "word/numbering.xml", w => WriteNumbering(w, parts));
         WritePart(zip, "word/_rels/document.xml.rels", w => WriteDocumentRels(w, parts));
         WritePart(zip, "word/document.xml", w => WriteDocument(w, document, parts));
 
@@ -125,10 +125,27 @@ public static class DocxWriter
 
         public PackageParts(DocxDocument document, IImageEncoder encoder)
         {
+            (string Format, int Start, string Label)? previousNumber = null;
+            int previousLevel = -1, previousId = 0;
             foreach (var section in document.Sections)
             {
                 foreach (var block in Flatten(section.Blocks))
                 {
+                    if (block is DocxParagraph { List: DocxListKind.Number, ListMarker.Length: > 0 } numbered)
+                    {
+                        var label = NumberLabel(numbered.ListMarker, numbered.ListLevel);
+                        bool continues = previousNumber is { } previous && previousLevel == numbered.ListLevel &&
+                            previous.Format == label.Format && previous.Label == label.Label && previous.Start + 1 == label.Start;
+                        if (!continues)
+                        {
+                            previousId = NumberingDefinitions.Count + 3;
+                            NumberingDefinitions.Add(previousId, numbered);
+                        }
+                        NumberedParagraphs.TryAdd(numbered, previousId);
+                        previousNumber = label;
+                        previousLevel = numbered.ListLevel;
+                    }
+                    else previousNumber = null;
                     switch (block)
                     {
                         case DocxPicture picture:
@@ -164,6 +181,13 @@ public static class DocxWriter
         }
 
         public List<MediaPart> Media { get; } = [];
+
+        public Dictionary<DocxParagraph, int> NumberedParagraphs { get; } = new(ReferenceEqualityComparer.Instance);
+
+        public Dictionary<int, DocxParagraph> NumberingDefinitions { get; } = [];
+
+        public int NumberId(DocxParagraph paragraph) => NumberedParagraphs.TryGetValue(paragraph, out int id)
+            ? id : paragraph.List == DocxListKind.Bullet ? BulletNumId : NumberNumId;
 
         public List<(string Path, HeaderPart Part)> HeaderParts { get; } = [];
 
@@ -510,13 +534,33 @@ public static class DocxWriter
         w.WriteEndElement();
     }
 
-    private static void WriteNumbering(XmlWriter w)
+    private static void WriteNumbering(XmlWriter w, PackageParts parts)
     {
         w.WriteStartElement("w", "numbering", WNs);
         AbstractNum(0, bullet: true);
         AbstractNum(1, bullet: false);
+        foreach (var (id, paragraph) in parts.NumberingDefinitions)
+        {
+            var (format, start, label) = NumberLabel(paragraph.ListMarker!, paragraph.ListLevel);
+            w.WriteStartElement("w", "abstractNum", WNs);
+            w.WriteAttributeString("w", "abstractNumId", WNs, id.ToString());
+            w.WriteStartElement("w", "lvl", WNs);
+            w.WriteAttributeString("w", "ilvl", WNs, Math.Clamp(paragraph.ListLevel, 0, 4).ToString());
+            Val("start", start.ToString());
+            Val("numFmt", format);
+            Val("lvlText", label);
+            w.WriteStartElement("w", "pPr", WNs);
+            w.WriteStartElement("w", "ind", WNs);
+            w.WriteAttributeString("w", "left", WNs, (720 * (Math.Clamp(paragraph.ListLevel, 0, 4) + 1)).ToString());
+            w.WriteAttributeString("w", "hanging", WNs, "360");
+            w.WriteEndElement();
+            w.WriteEndElement();
+            w.WriteEndElement();
+            w.WriteEndElement();
+        }
         Num(BulletNumId, 0);
         Num(NumberNumId, 1);
+        foreach (int id in parts.NumberingDefinitions.Keys) Num(id, id);
         w.WriteEndElement();
 
         void AbstractNum(int id, bool bullet)
@@ -573,6 +617,36 @@ public static class DocxWriter
         }
     }
 
+    private static (string Format, int Start, string Label) NumberLabel(string marker, int level)
+    {
+        string token = marker.Trim('(', ')', '.');
+        if (token.Length > 1 && token[0] == '0') return ("none", 1, marker);
+        string format;
+        int start;
+        if (int.TryParse(token, out start)) format = "decimal";
+        else if ((token.Length > 1 && token.All(c => "ivxlcdmIVXLCDM".Contains(c))) || token is "i" or "I")
+        {
+            format = char.IsUpper(token[0]) ? "upperRoman" : "lowerRoman";
+            start = 0;
+            int previous = 0;
+            foreach (char c in token.ToUpperInvariant().Reverse())
+            {
+                int value = c switch { 'I' => 1, 'V' => 5, 'X' => 10, 'L' => 50, 'C' => 100, 'D' => 500, 'M' => 1000, _ => 0 };
+                start += value < previous ? -value : value;
+                previous = value;
+            }
+        }
+        else if (token.Length == 1 && char.IsAsciiLetter(token[0]))
+        {
+            format = char.IsUpper(token[0]) ? "upperLetter" : "lowerLetter";
+            start = char.ToUpperInvariant(token[0]) - 'A' + 1;
+        }
+        else return ("none", 1, marker);
+
+        string label = marker.Replace(token, $"%{Math.Clamp(level, 0, 4) + 1}", StringComparison.Ordinal);
+        return (format, Math.Max(0, start), label);
+    }
+
     // ---- body ----
 
     private static void WriteDocument(XmlWriter w, DocxDocument document, PackageParts parts)
@@ -592,10 +666,15 @@ public static class DocxWriter
 
             // A section that is not the last carries its properties on its final paragraph, so the break
             // happens there. Word requires a paragraph to hang them on, and a table may not be last.
-            bool needsTrailingParagraph = blocks.Count == 0 || blocks[^1] is DocxTable || !last;
+            bool needsTrailingParagraph = blocks.Count == 0 || blocks[^1] is DocxTable ||
+                (!last && blocks[^1] is not DocxParagraph);
 
-            foreach (var block in blocks)
-                WriteBlock(w, block, parts);
+            for (int i = 0; i < blocks.Count; i++)
+            {
+                if (!last && i == blocks.Count - 1 && blocks[i] is DocxParagraph paragraph)
+                    WriteParagraph(w, paragraph, parts, section);
+                else WriteBlock(w, blocks[i], parts);
+            }
 
             if (needsTrailingParagraph)
             {
@@ -682,10 +761,10 @@ public static class DocxWriter
         }
     }
 
-    private static void WriteParagraph(XmlWriter w, DocxParagraph paragraph, PackageParts parts)
+    private static void WriteParagraph(XmlWriter w, DocxParagraph paragraph, PackageParts parts, DocxSection? section = null)
     {
         w.WriteStartElement("w", "p", WNs);
-        WriteParagraphProperties(w, paragraph);
+        WriteParagraphProperties(w, paragraph, parts, section);
 
         foreach (int id in paragraph.CommentIds) Marker(w, "commentRangeStart", id);
 
@@ -794,14 +873,14 @@ public static class DocxWriter
         w.WriteEndElement();
     }
 
-    private static void WriteParagraphProperties(XmlWriter w, DocxParagraph paragraph)
+    private static void WriteParagraphProperties(XmlWriter w, DocxParagraph paragraph, PackageParts parts, DocxSection? section)
     {
         bool hasStyle = paragraph.Style != DocxParagraphStyle.Body;
         bool hasIndent = paragraph.IndentTwips != 0 || paragraph.FirstLineTwips != 0;
-        bool hasSpacing = paragraph.SpaceBeforeTwips != 0 || paragraph.SpaceAfterTwips != 0 || paragraph.LineSpacingTwips != 0;
+        bool hasSpacing = paragraph.ExplicitSpacing || paragraph.SpaceBeforeTwips != 0 || paragraph.SpaceAfterTwips != 0 || paragraph.LineSpacingTwips != 0;
         bool hasList = paragraph.List != DocxListKind.None;
         if (!hasStyle && !hasIndent && !hasSpacing && !hasList &&
-            paragraph.Alignment == DocxAlignment.Left && !paragraph.PageBreakBefore)
+            paragraph.Alignment == DocxAlignment.Left && !paragraph.PageBreakBefore && section is null)
             return;
 
         w.WriteStartElement("w", "pPr", WNs);
@@ -819,15 +898,15 @@ public static class DocxWriter
             w.WriteAttributeString("w", "val", WNs, Math.Clamp(paragraph.ListLevel, 0, 4).ToString());
             w.WriteEndElement();
             w.WriteStartElement("w", "numId", WNs);
-            w.WriteAttributeString("w", "val", WNs, (paragraph.List == DocxListKind.Bullet ? BulletNumId : NumberNumId).ToString());
+            w.WriteAttributeString("w", "val", WNs, parts.NumberId(paragraph).ToString());
             w.WriteEndElement();
             w.WriteEndElement();
         }
         if (hasSpacing)
         {
             w.WriteStartElement("w", "spacing", WNs);
-            if (paragraph.SpaceBeforeTwips != 0) w.WriteAttributeString("w", "before", WNs, paragraph.SpaceBeforeTwips.ToString());
-            if (paragraph.SpaceAfterTwips != 0) w.WriteAttributeString("w", "after", WNs, paragraph.SpaceAfterTwips.ToString());
+            if (paragraph.ExplicitSpacing || paragraph.SpaceBeforeTwips != 0) w.WriteAttributeString("w", "before", WNs, paragraph.SpaceBeforeTwips.ToString());
+            if (paragraph.ExplicitSpacing || paragraph.SpaceAfterTwips != 0) w.WriteAttributeString("w", "after", WNs, paragraph.SpaceAfterTwips.ToString());
             if (paragraph.LineSpacingTwips != 0)
             {
                 w.WriteAttributeString("w", "line", WNs, paragraph.LineSpacingTwips.ToString());
@@ -855,6 +934,7 @@ public static class DocxWriter
             });
             w.WriteEndElement();
         }
+        if (section is not null) WriteSectionProperties(w, section, parts);
         w.WriteEndElement();
     }
 

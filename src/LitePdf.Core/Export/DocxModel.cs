@@ -69,8 +69,14 @@ public sealed record DocxParagraph(IReadOnlyList<DocxRun> Runs) : DocxBlock
     /// <summary>Exact line spacing in twips, or 0 for Word's default for the style.</summary>
     public int LineSpacingTwips { get; init; }
 
+    /// <summary>Write zero paragraph gaps explicitly instead of inheriting the Word style's spacing.</summary>
+    public bool ExplicitSpacing { get; init; }
+
     public DocxListKind List { get; init; }
     public int ListLevel { get; init; }
+
+    /// <summary>The printed label, including punctuation. Keeps restarts and letter/Roman labels intact.</summary>
+    public string? ListMarker { get; init; }
 
     /// <summary>Starts a new page before this paragraph.</summary>
     public bool PageBreakBefore { get; init; }

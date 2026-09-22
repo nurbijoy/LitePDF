@@ -105,6 +105,12 @@ Order of work in `WindowsOcrEngine.RecognizeAsync`:
   look exactly like a drawing.
 
 ## 5c. Word export (`Core/Export`, `PdfContentReader`)
+The app exports **text PDFs only**. `TextPdfExport.Validate` rejects image-only pages and invisible OCR
+layers before any destination file is created or replaced. It never runs OCR or renders an unsupported page
+as a fallback picture. Illustrations within text pages remain supported; short visible text is still text.
+The app keeps source line endings inside editable paragraphs and starts each source page separately.
+Core also supports reflow for callers that explicitly leave these layout options off.
+
 A PDF has no paragraphs, only positioned glyphs, so every structure in the .docx is inferred. The ordering
 principle is that **a rule that does not fire still leaves the content intact**: an unclaimed line becomes a
 correctly styled paragraph in the right place, and nothing is ever dropped to tidy the output.
@@ -118,9 +124,9 @@ correctly styled paragraph in the right place, and nothing is ever dropped to ti
      because `FPDFImageObj_GetRenderedBitmap` renders at the size the image is *placed* at, a stored image
      with more pixels than that is re-rendered from the page at its own resolution, or a 300 DPI scan would
      come back at 72 DPI.
-   - Text drawn with render mode 3 is the invisible OCR layer under a scan. It is used only when the page
-     has no visible text of its own, and then the picture it sits under is skipped, or every word would be
-     written twice.
+   - Text drawn with render mode 3 is the invisible OCR layer under a scan. It is read only when the page
+     has no visible text at all, and marked `IsSearchableScan` so Word export can reject it. Only that
+     layer causes a page-sized background picture to be skipped; large illustrations on text pages stay.
    - Objects inside a form XObject are walked with a matrix stack, because a nested object's bounds are in
      the form's space; without it a picture placed through a form is dropped or lands in the wrong place.
    - Paths are sorted into three kinds: a hairline is a table rule, an axis-aligned filled rectangle is a
@@ -145,6 +151,18 @@ correctly styled paragraph in the right place, and nothing is ever dropped to ti
    prompt, which is a hard failure.
 
 ### 5d. Why these rules and not others
+- **Layout and editable text are both required.** App exports keep explicit line breaks and source page
+  boundaries, write zero paragraph gaps explicitly, and avoid justifying hard line breaks. Paper-size
+  section properties attach to the final text paragraph instead of adding an empty paragraph.
+- **Only a stable, represented header is removed from the body.** A header must occur once on every
+  selected consecutive page and differ only in its page number. Other repeating lines and changing chapter
+  titles stay in the body. Every page is checked, not just the first five.
+- **Printed list labels carry meaning.** Numbers, letters, Roman labels, punctuation and restarts feed
+  Word numbering; a new list instance starts when the original sequence restarts or changes format.
+- **Only explicit soft hyphens may be deleted during reflow.** A hard hyphen in `well-known` is source
+  content. Layout-preserving export keeps all source line endings and hyphens.
+- **PDFium can put both columns on one line.** Wide gaps are tested as possible column corridors, accepted
+  only when repeated prose supports the split. Existing tables keep their own reconstruction path.
 - **A line ends its paragraph only if the next line's first word would have fitted on it.** A fixed
   fraction of the measure gets this wrong constantly: ragged-right prose routinely stops 20 pt short
   because the next word is 30 pt wide, and that has ended nothing.

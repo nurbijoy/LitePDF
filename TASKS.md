@@ -1,5 +1,22 @@
 # TASKS
 
+## Word conversion quality and text-only scope (2026-09-22)
+- Removed OCR and whole-page raster fallback from the app's Word export. Image documents cannot use the
+  command; image-only PDF pages and invisible OCR layers are rejected before output is created/replaced.
+  Mixed documents can be exported by selecting their text pages. Short visible text remains valid.
+- Keep source line endings and page boundaries in the app's editable Word output. Explicit paragraph
+  spacing avoids inherited gaps; hard line breaks are not justified. Mixed paper sizes no longer add an
+  unnecessary blank paragraph at the section boundary.
+- Fix same-baseline two-column prose, literal `[Figure]` text loss, compound-word hyphens, and paragraph
+  joins across skipped pages. Preserve list labels, punctuation, starting numbers and restarts; consecutive
+  compatible numbered items share a Word numbering instance.
+- Header detection now checks every selected page, only removes the header/footer actually represented
+  in Word, and leaves changing chapter titles and extra repeated lines in the body.
+- Large illustrations on text PDFs are no longer mistaken for scan backgrounds. Cancellation is checked
+  again before the temporary output replaces an existing file.
+
+Verification and remaining visual checks are recorded after the final test run below.
+
 ## Convert to Word (.docx), the rest of it (2026-09-22, T-F7)
 Everything the first pass left on the floor: vector artwork, pictures inside form XObjects, the colour behind
 a table cell, tables that draw no lines, tagged PDFs, sticky notes, and optional font embedding.

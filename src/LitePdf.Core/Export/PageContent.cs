@@ -117,6 +117,9 @@ public sealed record PageContent(
     IReadOnlyList<PlacedImage> Images,
     IReadOnlyList<RuleSegment> Rules)
 {
+    /// <summary>The only usable text came from an invisible OCR layer, not printed PDF text.</summary>
+    public bool IsSearchableScan { get; init; }
+
     /// <summary>Filled rectangles, which is where a shaded table cell gets its colour.</summary>
     public IReadOnlyList<FilledArea> Fills { get; init; } = [];
 

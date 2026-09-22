@@ -12,6 +12,73 @@ namespace LitePdf.Core.Tests;
 /// </summary>
 public sealed class DocxExportEndToEndTests
 {
+    [Fact]
+    public async Task Keeps_a_large_illustration_on_a_visible_text_page()
+    {
+        var b = new SamplePdfBuilder();
+        int catalog = b.Reserve(), pages = b.Reserve();
+        int font = b.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+        int image = b.AddStream("/Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8",
+            [220, 180, 100]);
+        int stream = b.AddStream("", Encoding.ASCII.GetBytes(
+            "q 540 0 0 700 36 36 cm /Im0 Do Q\nBT /F1 12 Tf 72 750 Td (Illustration caption) Tj ET"));
+        int pageId = b.Add($"<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 612 792] /Contents {stream} 0 R /Resources << /Font << /F1 {font} 0 R >> /XObject << /Im0 {image} 0 R >> >> >>");
+        b.Set(pages, $"<< /Type /Pages /Kids [{pageId} 0 R] /Count 1 >>");
+        b.Set(catalog, $"<< /Type /Catalog /Pages {pages} 0 R >>");
+        string path = Samples.TempPath();
+        await File.WriteAllBytesAsync(path, b.Build(catalog));
+        await using var document = await PdfiumDocument.OpenAsync(path);
+        var page = await document.GetPageContentAsync(0, RenderPriority.Background);
+        TextPdfExport.Validate([page]);
+        Assert.Single(page.Images);
+        Assert.Contains("Illustration caption", page.Text.Text);
+    }
+
+    [Fact]
+    public async Task Text_layout_export_keeps_every_character_and_starts_each_source_page_separately()
+    {
+        await using var document = await PdfiumDocument.OpenAsync(Samples.TextPdf());
+        var pages = await ReadAllAsync(document);
+        TextPdfExport.Validate(pages);
+        var options = ExportOptions.Default with { PreserveLineBreaks = true, PreservePageBreaks = true };
+        using var package = DocxPackage.Write(ContentComposer.Compose(pages, options: options));
+        package.AssertValid();
+        Assert.Equal(Visible(string.Concat(pages.Select(p => p.Text.Text))), Visible(package.AllText()));
+        var w = System.Xml.Linq.XNamespace.Get("http://schemas.openxmlformats.org/wordprocessingml/2006/main");
+        // Section breaks also begin a new page when the paper size changes.
+        int breaks = package.Document.Descendants(w + "pageBreakBefore").Count() +
+            package.Document.Descendants(w + "sectPr").Count() - 1;
+        Assert.Equal(document.PageCount - 1, breaks);
+        Assert.True(package.Document.Descendants(w + "br").Count() > 100);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Distinguishes_sparse_visible_text_from_an_invisible_scan_layer(bool visible)
+    {
+        var b = new SamplePdfBuilder();
+        int catalog = b.Reserve(), pages = b.Reserve();
+        int font = b.Add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+        string content = "BT /F1 12 Tf 3 Tr 72 650 Td (Hidden OCR words) Tj ET\n" +
+            (visible ? "BT /F1 12 Tf 0 Tr 72 700 Td (Hi) Tj ET" : "");
+        int stream = b.AddStream("", Encoding.ASCII.GetBytes(content));
+        int pageId = b.Add($"<< /Type /Page /Parent {pages} 0 R /MediaBox [0 0 612 792] /Contents {stream} 0 R /Resources << /Font << /F1 {font} 0 R >> >> >>");
+        b.Set(pages, $"<< /Type /Pages /Kids [{pageId} 0 R] /Count 1 >>");
+        b.Set(catalog, $"<< /Type /Catalog /Pages {pages} 0 R >>");
+        string path = Samples.TempPath();
+        await File.WriteAllBytesAsync(path, b.Build(catalog));
+        await using var document = await PdfiumDocument.OpenAsync(path);
+        var page = await document.GetPageContentAsync(0, RenderPriority.Background);
+        Assert.Equal(!visible, page.IsSearchableScan);
+        if (visible)
+        {
+            Assert.Equal("Hi", page.Text.Text.Trim());
+            TextPdfExport.Validate([page]);
+        }
+        else Assert.Throws<NotSupportedException>(() => TextPdfExport.Validate([page]));
+    }
+
     private static string Visible(string text) => new([.. text.Where(c => !char.IsWhiteSpace(c))]);
 
     private static async Task<List<PageContent>> ReadAllAsync(PdfiumDocument document)

@@ -14,9 +14,6 @@ namespace LitePdf.Pdfium;
 /// </summary>
 public sealed unsafe partial class PdfiumDocument
 {
-    /// <summary>Below this many visible characters a page is a scan, and its invisible OCR layer is the text.</summary>
-    private const int MinVisibleCharsForRealText = 8;
-
     /// <summary>An image covering this much of a scanned page is the scan itself, not an illustration.</summary>
     private const double ScanBackgroundCoverage = 0.6;
 
@@ -56,12 +53,12 @@ public sealed unsafe partial class PdfiumDocument
         var read = ReadStyledText(pageIndex, page, frame, request);
         ct.ThrowIfCancellationRequested();
 
-        bool hasText = read.FromInvisibleLayer || read.Text.VisibleCharCount >= MinVisibleCharsForRealText;
-        var scan = ReadObjects(page, frame, size, read.Text, hasText, request, ct);
+        var scan = ReadObjects(page, frame, size, read.Text, read.FromInvisibleLayer, request, ct);
         ct.ThrowIfCancellationRequested();
 
         return new PageContent(pageIndex, size, read.Text, read.Spans, scan.Images, scan.Rules)
         {
+            IsSearchableScan = read.FromInvisibleLayer,
             Fills = scan.Fills,
             Marks = read.Marks,
             Fonts = read.Fonts,
@@ -146,7 +143,7 @@ public sealed unsafe partial class PdfiumDocument
             // A searchable scan carries its whole text in an invisible layer under the picture. Keeping both
             // would write every word twice; keeping neither would lose the page. So the layer is used only
             // when there is no real text to use instead.
-            bool useInvisible = visible < MinVisibleCharsForRealText && invisible > 0;
+            bool useInvisible = visible == 0 && invisible > 0;
 
             var sb = new StringBuilder(records.Count);
             var boxes = new List<float>(records.Count * 4);

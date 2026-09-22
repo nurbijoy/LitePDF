@@ -542,7 +542,12 @@ public partial class MainWindow
             return;
         }
 
-        if (ExportDocxDialog.Show(this, session.PageCount, Viewer.CurrentPageIndex, _ocr.IsAvailable) is not { } settings) return;
+        if (!session.IsPdf)
+        {
+            ShowToast("Word conversion supports text PDFs only");
+            return;
+        }
+        if (ExportDocxDialog.Show(this, session.PageCount, Viewer.CurrentPageIndex) is not { } settings) return;
 
         var save = new SaveFileDialog
         {
@@ -575,6 +580,10 @@ public partial class MainWindow
         catch (OperationCanceledException)
         {
             ShowToast("Conversion cancelled");
+        }
+        catch (NotSupportedException ex)
+        {
+            MessageDialog.Show(this, "Text PDFs only", ex.Message, isError: false);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or PdfiumException)
         {

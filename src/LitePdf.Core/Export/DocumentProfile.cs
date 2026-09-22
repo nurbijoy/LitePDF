@@ -63,7 +63,10 @@ internal sealed class DocumentProfile
     }
 
     public bool IsRunningHead(RectD bounds, string text) =>
-        _runningHeads.Count > 0 && InBand(bounds) && _runningHeads.Contains(NormalizeRunningHead(text));
+        _runningHeads.Count > 0 && InBand(bounds) && _runningHeads.Contains(RunningKey(bounds, text));
+
+    private static string RunningKey(RectD bounds, string text) =>
+        (bounds.Bottom <= ContentComposerBands.Header ? "header:" : "footer:") + NormalizeRunningHead(text);
 
     private static bool InBand(RectD bounds) =>
         bounds.Bottom <= ContentComposerBands.Header || bounds.Top >= ContentComposerBands.Footer;
@@ -102,7 +105,7 @@ internal sealed class DocumentProfile
                 string raw = page.Text.Text[line.Start..line.End];
                 if (raw.Trim().Length == 0) continue;
                 if (runningHeads.Count > 0 && InBand(line.Bounds) &&
-                    runningHeads.Contains(NormalizeRunningHead(raw.Trim()))) continue;
+                    runningHeads.Contains(RunningKey(line.Bounds, raw.Trim()))) continue;
 
                 lineHeights.Add(line.Bounds.Height);
                 body.Add(line.Bounds);
@@ -193,7 +196,6 @@ internal sealed class DocumentProfile
     private static readonly Regex DigitRun = new(@"\d+", RegexOptions.Compiled);
 
     /// <summary>Samples kept per candidate; two are enough to tell a page number from a section number.</summary>
-    private const int MaxSamples = 5;
 
     private static string NormalizeRunningHead(string text) =>
         DigitRun.Replace(text.Trim(), "#").Replace("  ", " ");
@@ -208,7 +210,8 @@ internal sealed class DocumentProfile
     private static (HashSet<string> Keys, DocxHeaderFooter? Header, DocxHeaderFooter? Footer, int Start)
         FindRunningHeads(IReadOnlyList<PageContent> pages)
     {
-        if (pages.Count < 4) return ([], null, null, 0);
+        if (pages.Count < 4 || pages.Zip(pages.Skip(1)).Any(p => p.Second.PageIndex != p.First.PageIndex + 1))
+            return ([], null, null, 0);
 
         var top = new Dictionary<string, Candidate>(StringComparer.Ordinal);
         var bottom = new Dictionary<string, Candidate>(StringComparer.Ordinal);
@@ -230,13 +233,13 @@ internal sealed class DocumentProfile
                     : null;
                 if (bucket is null) continue;
 
-                string key = NormalizeRunningHead(raw);
+                string key = RunningKey(line.Bounds, raw);
                 if (!bucket.TryGetValue(key, out var candidate))
                 {
                     bucket[key] = candidate = new Candidate { Style = page.StyleAt(line.Start) };
                 }
-                if (candidate.Pages.Add(page.PageIndex) && candidate.Samples.Count < MaxSamples)
-                    candidate.Samples.Add((page.PageIndex, raw));
+                candidate.Pages.Add(page.PageIndex);
+                candidate.Samples.Add((page.PageIndex, raw));
             }
         }
 
@@ -251,18 +254,21 @@ internal sealed class DocumentProfile
     {
         DocxHeaderFooter? best = null;
         int bestCount = 0, start = 0;
+        string? bestKey = null;
 
         foreach (var (key, candidate) in candidates)
         {
             int count = candidate.Pages.Count;
-            // Three pages and a quarter of the document: enough that it is furniture, not content.
-            if (count < ContentComposerBands.MinRepeats || count < pageCount * 0.25) continue;
-            keys.Add(key);
+            // A single section header can only represent a line present exactly once on every page.
+            if (count != pageCount || candidate.Samples.Count != pageCount) continue;
             if (count <= bestCount) continue;
-
+            var (content, first) = BuildRunning(candidate);
+            if (content is null) continue;
             bestCount = count;
-            (best, start) = BuildRunning(candidate);
+            (best, start) = (content, first);
+            bestKey = key;
         }
+        if (bestKey is not null) keys.Add(bestKey);
         return (best, start);
     }
 
@@ -312,19 +318,26 @@ internal sealed class DocumentProfile
             }
         }
 
-        if (index < 0) return (Literal(), 0);
+        if (index < 0) return candidate.Samples.All(s => s.Text == sample) ? (Literal(), 0) : (null, 0);
 
         var match = matches[index];
         var runs2 = new List<DocxRun>();
         string before = sample[..match.Index];
         string after = sample[(match.Index + match.Length)..];
+        // Only the page number may vary. "Section 2" must never become "Section 1".
+        foreach (var (_, text) in candidate.Samples)
+        {
+            var number = DigitRun.Matches(text)[index];
+            if (text[..number.Index] != before || text[(number.Index + number.Length)..] != after)
+                return (null, 0);
+        }
         if (before.Length > 0) runs2.Add(new DocxRun(before, style));
         int numberRun = runs2.Count;
         runs2.Add(new DocxRun(match.Value, style));
         if (after.Length > 0) runs2.Add(new DocxRun(after, style));
 
         return (new DocxHeaderFooter(runs2, DocxAlignment.Center) { PageNumberRun = numberRun },
-                offset == 1 ? 0 : offset);
+                int.Parse(match.Value, System.Globalization.CultureInfo.InvariantCulture));
     }
 
     private static RectD TextArea(PageContent page)

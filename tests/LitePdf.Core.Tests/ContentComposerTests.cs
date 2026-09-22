@@ -151,7 +151,7 @@ public sealed class ContentComposerTests
     public void Joins_a_word_broken_across_lines_by_a_hyphen()
     {
         var page = new PageBuilder()
-            .Line("The committee reached an understand-", Left, Top(0), Right)
+            .Line("The committee reached an understand\u00AD", Left, Top(0), Right)
             .Line("ing before the end of the afternoon session and then left.", Left, Top(1), Right)
             .Line("It was over.", Left, Top(2), 0.3);
 
@@ -169,7 +169,7 @@ public sealed class ContentComposerTests
             .Line("Nothing was settled.", Left, Top(2), 0.3);
 
         var paragraph = Assert.Single(Compose(page));
-        Assert.Contains("Anglo- German", paragraph.Text);
+        Assert.Contains("Anglo-German", paragraph.Text);
     }
 
     [Fact]
@@ -358,11 +358,10 @@ public sealed class ContentComposerTests
                 .Build(p));
         }
 
-        var header = ContentComposer.Compose(pages).Sections[0].Header;
-        Assert.NotNull(header);
-        Assert.Equal(1, header!.PageNumberRun);
-        Assert.Equal("Section 1, page ", header.Runs[0].Text);
-        Assert.Equal("1", header.Runs[1].Text);
+        var document = ContentComposer.Compose(pages);
+        Assert.Null(document.Sections[0].Header);
+        string body = string.Join("\n", document.Sections.SelectMany(s => s.Blocks).OfType<DocxParagraph>().Select(p => p.Text));
+        for (int p = 0; p < 8; p++) Assert.Contains($"Section {p / 4 + 1}, page {p + 1}", body);
     }
 
     [Fact]
