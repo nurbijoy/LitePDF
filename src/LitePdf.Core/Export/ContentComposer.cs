@@ -32,11 +32,21 @@ public sealed record ExportOptions
     /// <summary>Joins a paragraph that runs from the foot of one page to the head of the next.</summary>
     public bool JoinAcrossPages { get; init; } = true;
 
-    /// <summary>Keep source line endings inside editable paragraphs instead of reflowing them.</summary>
+    /// <summary>
+    /// Keep source line endings inside paragraphs instead of reflowing them. Off by default: Word never
+    /// sets a line exactly as wide as the PDF did, so a forced break after a line Word had to wrap leaves
+    /// a one-word line behind it, and every one of them pushes the page further down.
+    /// </summary>
     public bool PreserveLineBreaks { get; init; }
 
-    /// <summary>Start each source page on a new Word page, including gaps in a selected page range.</summary>
-    public bool PreservePageBreaks { get; init; }
+    /// <summary>Where a source page boundary becomes a page break in Word. See <see cref="PageBreakMode"/>.</summary>
+    public PageBreakMode PageBreaks { get; init; } = PageBreakMode.Deliberate;
+
+    /// <summary>
+    /// The line height Word gives each installed font. With it, line spacing is written as a multiple that
+    /// still behaves when the text is edited; without it, as an exact height that at least matches the page.
+    /// </summary>
+    public IFontMetrics? FontMetrics { get; init; }
 
     public static ExportOptions Default { get; } = new();
 
@@ -47,6 +57,39 @@ public sealed record ExportOptions
         Tags = UseTags,
         Fonts = EmbedFonts,
     };
+}
+
+/// <summary>How the page boundaries of the PDF carry over to Word.</summary>
+public enum PageBreakMode
+{
+    /// <summary>One continuous flow; Word paginates it however the text falls.</summary>
+    None,
+
+    /// <summary>
+    /// A new page only where the author started one: the previous page stopped well short of its foot, as a
+    /// title page or the end of a chapter does. A full page flows on, so text Word sets a little longer
+    /// than the PDF runs onto the next page instead of leaving a near-empty page behind it.
+    /// </summary>
+    Deliberate,
+
+    /// <summary>Every source page starts a new page, whether or not the previous one was full.</summary>
+    EveryPage,
+}
+
+/// <summary>Font measurements the host can supply; Core has no access to installed fonts of its own.</summary>
+public interface IFontMetrics
+{
+    /// <summary>
+    /// Word's single line height for <paramref name="family"/> as a multiple of the font size, or null when
+    /// the font is not installed — in which case Word substitutes another and its height is unknowable.
+    /// </summary>
+    double? LineHeight(string family);
+
+    /// <summary>
+    /// How far below the top of Word's line the baseline sits at single spacing, as a multiple of the font
+    /// size, or null when the font is not installed.
+    /// </summary>
+    double? Ascent(string family) => null;
 }
 
 /// <summary>Per-page input beyond the drawing itself.</summary>
@@ -96,12 +139,12 @@ public static class ContentComposer
         var headings = profile.Outline;
         var comments = new CommentSink();
 
-        var composed = new List<(PageContent Page, List<DocxBlock> Blocks)>(pages.Count);
+        var composed = new List<ComposedPage>(pages.Count);
         for (int i = 0; i < pages.Count; i++)
         {
             var page = pages[i];
             var pageExtras = extras is not null && i < extras.Count ? extras[i] : PageExtras.None;
-            composed.Add((page, ComposePage(page, pageExtras, profile, headings, options, comments)));
+            composed.Add(ComposePage(page, pageExtras, profile, headings, options, comments));
         }
 
         var sections = BuildSections(composed, profile, options);
@@ -175,43 +218,156 @@ public static class ContentComposer
             Bounds.Contains(para.Bounds.Center) && (Claims is null || Claims(para));
     }
 
-    private static List<DocxBlock> ComposePage(
+    /// <summary>
+    /// What a page contributes: its blocks, and how far down the page its content reaches, normalized. The
+    /// extent is what tells a full page from one its author ended early.
+    /// </summary>
+    private sealed record ComposedPage(PageContent Page, List<DocxBlock> Blocks, double ContentTop, double ContentBottom);
+
+    /// <summary>Something laid out in the text flow of a page, in reading order.</summary>
+    private abstract record FlowItem(RectD Bounds);
+
+    private sealed record ParaFlow(Para Para) : FlowItem(Para.Bounds);
+
+    private sealed record TableFlow(DocxTable Table, RectD Area) : FlowItem(Area);
+
+    private sealed record PictureFlow(DocxPicture Picture, RectD Area) : FlowItem(Area);
+
+    /// <summary>Where a zone of the page starts in the flow; columns begin here when it has them.</summary>
+    private sealed record ZoneFlow(Zone Zone, int Index) : FlowItem(new RectD(Zone.Rect.Left, Zone.Rect.Top, Zone.Rect.Right, Zone.Rect.Top));
+
+    /// <summary>Where column <see cref="Column"/> of a zone ends in the flow and the next one begins.</summary>
+    private sealed record ColumnEndFlow(Zone Zone, int Column) : FlowItem(RectD.Empty);
+
+    /// <summary>Marks the start of a zone in the blocks of a page, for the sections to be cut there.</summary>
+    private sealed record ZoneBreak(DocxColumns Columns) : DocxBlock;
+
+    private static void CloseColumns(List<FlowItem> flow, List<Zone> zones, int zone, int unit)
+    {
+        if (zone < 0 || !zones[zone].IsColumns) return;
+        for (int u = unit; u < zones[zone].Units.Count - 1; u++) flow.Add(new ColumnEndFlow(zones[zone], u));
+    }
+
+    /// <summary>Pictures wide enough that they could cut across a column block.</summary>
+    private static IEnumerable<RectD> WideImages(PageContent page, List<Zone> zones)
+    {
+        foreach (var image in page.Images)
+        {
+            var b = image.Bounds;
+            if (b.Width * b.Height > 0.5) continue;                    // a page background, not a figure
+            if (b.Bottom <= ContentComposerBands.Header || b.Top >= ContentComposerBands.Footer) continue;
+            yield return b;
+        }
+    }
+
+    /// <summary>True when the block sits in a column zone and reaches into more than one of its columns.</summary>
+    private static bool CutsAcrossColumns(RectD bounds, List<Zone> zones)
+    {
+        foreach (var zone in zones)
+        {
+            if (!zone.IsColumns) continue;
+            if (bounds.Bottom <= zone.Rect.Top || bounds.Top >= zone.Rect.Bottom) continue;
+            int reached = zone.Bands.Count(band =>
+                Math.Min(bounds.Right, band.Right) - Math.Max(bounds.Left, band.Left) > (band.Right - band.Left) * 0.15);
+            if (reached > 1) return true;
+        }
+        return false;
+    }
+
+    /// <summary>The Word columns for a zone, fitted to the section's text width.</summary>
+    private static DocxColumns ColumnsFor(Zone zone, PageContent page, DocumentProfile profile)
+    {
+        if (!zone.IsColumns) return DocxColumns.Single;
+        double width = page.Size.Width;
+        var widths = zone.Bands.Select(b => (b.Right - b.Left) * width).ToList();
+        var gaps = new List<double>();
+        for (int i = 1; i < zone.Bands.Count; i++) gaps.Add(Math.Max(6, (zone.Bands[i].Left - zone.Bands[i - 1].Right) * width));
+
+        // The bands are measured from the text in them, which stops short of the column's own right edge,
+        // so they are scaled up together until they fill the text area Word will have.
+        double measure = width - profile.Margins.Left - profile.Margins.Right;
+        double total = widths.Sum() + gaps.Sum();
+        double scale = total > 0 ? measure / total : 1;
+        widths = [.. widths.Select(w => w * scale)];
+        gaps = [.. gaps.Select(g => g * scale)];
+
+        bool equal = widths.Max() <= widths.Min() * 1.06;
+        return new DocxColumns(zone.Bands.Count, gaps.Average())
+        {
+            WidthsPoints = equal ? [] : widths,
+            GapsPoints = equal ? [] : gaps,
+        };
+    }
+
+    /// <summary>A picture placed off the flow, and the paragraph it hangs from (null: from the page).</summary>
+    private sealed record Floating(DocxPicture Picture, RectD Area, Para? Anchor);
+
+    private static ComposedPage ComposePage(
         PageContent page, PageExtras extras, DocumentProfile profile,
         ILookup<int, (double Y, int Depth, string Title)> headings, ExportOptions options, CommentSink comments)
     {
         var tags = options.UseTags ? TagIndex.Build(page) : TagIndex.Empty;
         var lines = ReadLines(page, profile, options);
-        var blocks = new List<DocxBlock>();
 
         var paragraphs = new List<Para>();
-        var columns = SplitIntoColumns(lines, profile, page, tags.Tables.Count > 0 || options.UnruledTables);
-        foreach (var (column, columnLines) in columns)
-            paragraphs.AddRange(GroupParagraphs(columnLines, column, page));
+        var zones = SplitIntoZones(lines, profile, page, tags.Tables.Count > 0 || options.UnruledTables);
+        var columns = zones.SelectMany(z => z.Units).Where(u => u.Lines.Count > 0).ToList();
+        var home = new Dictionary<Para, (int Zone, int Unit)>(ReferenceEqualityComparer.Instance);
+        for (int z = 0; z < zones.Count; z++)
+        {
+            for (int u = 0; u < zones[z].Units.Count; u++)
+            {
+                var (column, columnLines) = zones[z].Units[u];
+                foreach (var para in GroupParagraphs(columnLines, column, page))
+                {
+                    paragraphs.Add(para);
+                    home[para] = (z, u);
+                }
+            }
+        }
 
         if (!tags.IsEmpty) paragraphs = ApplyTags(paragraphs, tags, profile, options);
         if (options.Lists) MarkLists(paragraphs);
         if (options.Headings) MarkHeadings(paragraphs, profile, headings, page.PageIndex);
 
         var tables = FindTables(page, extras, profile, options, tags, columns);
-        var emitted = new HashSet<int>();
-        var placed = new List<(Para Para, int Block)>(paragraphs.Count);
 
-        double previousBottom = double.NaN;
+        // Columns are carried into Word only where nothing on the page cuts across them. A table or a
+        // figure spanning two columns in the middle of a column block has no place in Word's sections, and
+        // then the page is read column by column into a single measure instead, which loses nothing.
+        bool wordColumns = zones.Any(z => z.IsColumns) &&
+            !tables.Select(t => t.Bounds).Concat(WideImages(page, zones)).Any(b => CutsAcrossColumns(b, zones));
+
+        var flow = new List<FlowItem>(paragraphs.Count);
+        var emitted = new HashSet<int>();
+        int currentZone = -1, currentUnit = 0;
+
         foreach (var para in paragraphs)
         {
+            if (wordColumns)
+            {
+                var (z, u) = home.TryGetValue(para, out var where) ? where : (Math.Max(0, currentZone), currentUnit);
+                if (z != currentZone)
+                {
+                    CloseColumns(flow, zones, currentZone, currentUnit);
+                    flow.Add(new ZoneFlow(zones[z], z));
+                    (currentZone, currentUnit) = (z, 0);
+                }
+                for (; zones[z].IsColumns && currentUnit < u; currentUnit++)
+                    flow.Add(new ColumnEndFlow(zones[z], currentUnit));
+            }
+
             int table = tables.FindIndex(t => t.Owns(para));
             if (table >= 0)
             {
                 // The text of the table is rebuilt from the page rather than from these paragraphs: a row
                 // of cells is one visual line, so it has to be cut apart by position, not by line.
-                if (emitted.Add(table)) blocks.Add(tables[table].Build());
+                if (emitted.Add(table)) flow.Add(new TableFlow(tables[table].Build(), tables[table].Bounds));
                 continue;
             }
-
-            placed.Add((para, blocks.Count));
-            blocks.Add(BuildParagraph(para, page, extras, profile, options, previousBottom));
-            previousBottom = para.Bounds.Bottom;
+            flow.Add(new ParaFlow(para));
         }
+        if (wordColumns) CloseColumns(flow, zones, currentZone, currentUnit);
 
         // A table no paragraph sits inside has nothing to hang off and would be dropped — unless it is
         // empty, in which case there is nothing to lose and a stray grid would only be noise.
@@ -219,12 +375,243 @@ public static class ContentComposer
         {
             if (!emitted.Add(i)) continue;
             var table = tables[i].Build();
-            if (table.Rows.SelectMany(r => r.Cells).Any(c => c.Blocks.Count > 0)) blocks.Add(table);
+            if (table.Rows.SelectMany(r => r.Cells).Any(c => c.Blocks.Count > 0))
+                InsertByPosition(flow, new TableFlow(table, tables[i].Bounds));
         }
 
+        var floating = new List<Floating>();
+        if (options.Images && page.Images.Count > 0) PlacePictures(page, profile, tags, options, flow, floating);
+
+        var blocks = new List<DocxBlock>(flow.Count);
+        var placed = new List<(Para Para, int Block)>(paragraphs.Count);
+        LayOut(flow, blocks, placed, page, extras, profile, options);
+
+        AttachRules(blocks, placed, page, profile, tables.Select(t => t.Bounds).ToList());
+        AttachFloating(blocks, placed, floating, page, profile, options);
         if (options.Annotations) AttachComments(blocks, placed, extras, comments);
-        if (options.Images && page.Images.Count > 0) InsertImages(blocks, page, paragraphs, profile, tags, options);
-        return blocks;
+
+        // Pictures behind the text are decoration, and so is anything standing in the margin beside the text
+        // area; everything else is content the page had to make room for.
+        double areaLeft = profile.Margins.Left / page.Size.Width;
+        double areaRight = 1 - profile.Margins.Right / page.Size.Width;
+        var extent = flow.Where(f => f is not (ZoneFlow or ColumnEndFlow)).Select(f => f.Bounds)
+            .Concat(floating.Where(f => f.Picture.Wrap == DocxWrap.Square).Select(f => f.Area))
+            .Where(b => !b.IsEmpty && Math.Min(b.Right, areaRight) - Math.Max(b.Left, areaLeft) >= b.Width * 0.5)
+            .ToList();
+        double top = extent.Count > 0 ? extent.Min(b => b.Top) : double.NaN;
+        double bottom = extent.Count > 0 ? extent.Max(b => b.Bottom) : double.NaN;
+        return new ComposedPage(page, blocks, top, bottom);
+    }
+
+    /// <summary>
+    /// Turns the flow into blocks, spacing each from the one before it.
+    ///
+    /// Spacing is measured top to top, which is how Word stacks lines: the next block starts one line pitch
+    /// below the top of the previous paragraph's last line, plus whatever gap the page shows beyond that.
+    /// The pitch subtracted is the one the previous paragraph is actually written with, so the two cannot
+    /// disagree and the error cannot accumulate down the page.
+    /// </summary>
+    private static void LayOut(
+        List<FlowItem> flow, List<DocxBlock> blocks, List<(Para Para, int Block)> placed,
+        PageContent page, PageExtras extras, DocumentProfile profile, ExportOptions options)
+    {
+        double height = page.Size.Height;
+        double maxGap = height / 3;
+        FlowItem? previous = null;
+        double previousPitch = 0, previousOffset = 0;
+
+        // At the top of every column the text is spaced from what stood above the zone, as the first
+        // column is; and a column the author ended early is ended in Word too.
+        (FlowItem? Item, double Pitch, double Offset) zoneEntry = (null, 0, 0);
+        int columnStart = 0;
+        double columnBottom = double.NaN;
+        double breakRoom = profile.PitchFor(profile.BodySize) * 3;
+
+        foreach (var item in flow)
+        {
+            switch (item)
+            {
+                case ZoneFlow zone:
+                    blocks.Add(new ZoneBreak(ColumnsFor(zone.Zone, page, profile)));
+                    zoneEntry = (previous, previousPitch, previousOffset);
+                    columnStart = blocks.Count;
+                    columnBottom = double.NaN;
+                    continue;
+
+                case ColumnEndFlow end:
+                    bool empty = blocks.Count == columnStart;
+                    bool early = empty || double.IsNaN(columnBottom) ||
+                                 (end.Zone.Rect.Bottom - columnBottom) * height > breakRoom;
+                    if (early)
+                    {
+                        if (!empty && blocks[^1] is DocxParagraph last) blocks[^1] = last with { ColumnBreakAfter = true };
+                        else blocks.Add(Spacer with { ColumnBreakAfter = true });
+                    }
+                    (previous, previousPitch, previousOffset) = zoneEntry;
+                    columnStart = blocks.Count;
+                    columnBottom = double.NaN;
+                    continue;
+            }
+            columnBottom = double.IsNaN(columnBottom) ? item.Bounds.Bottom : Math.Max(columnBottom, item.Bounds.Bottom);
+
+            // What Word places at a block's top is its line box; what the PDF shows is the glyphs, which sit
+            // some way down inside it. Between two paragraphs the two offsets largely cancel. Against a
+            // table or a picture, whose top is its top, they do not, and ignoring them lifts the text a
+            // couple of points before every table and drops it as much after.
+            double offset = item is ParaFlow { Para: var next } ? TextOffset(next, PitchOf(next, page, profile), page, options) : 0;
+            double gap = 0;
+            if (previous is ParaFlow { Para: var above })
+                gap = (item.Bounds.Top - above.Lines[^1].Bounds.Top) * height - previousPitch + previousOffset - offset;
+            else if (previous is not null)
+                gap = (item.Bounds.Top - previous.Bounds.Bottom) * height - offset;
+            gap = Math.Clamp(gap, 0, maxGap);
+
+            switch (item)
+            {
+                case ParaFlow { Para: var para }:
+                    double pitch = PitchOf(para, page, profile);
+                    placed.Add((para, blocks.Count));
+                    blocks.Add(BuildParagraph(para, page, extras, profile, options, gap, pitch));
+                    previousPitch = pitch;
+                    previousOffset = offset;
+                    break;
+
+                case TableFlow table:
+                    // A table has no space before of its own; the gap above it belongs to what precedes it.
+                    if (blocks.Count > 0 && blocks[^1] is DocxParagraph before)
+                        blocks[^1] = before with { SpaceAfterTwips = SpacingTwips(gap) };
+                    blocks.Add(table.Table);
+                    break;
+
+                case PictureFlow picture:
+                    blocks.Add(picture.Picture with { SpaceBeforeTwips = SpacingTwips(gap) });
+                    break;
+            }
+            previous = item;
+        }
+    }
+
+    /// <summary>
+    /// How far below the top of Word's line box the paragraph's glyphs start, in points. Measured against
+    /// Word: the baseline sits at the font's ascent for single spacing and any larger multiple (the extra
+    /// goes below the text), at that ascent scaled down for a multiple under one, and at four fifths of
+    /// the line for exact spacing. The glyph box PDFium reports reaches three quarters of its height above
+    /// the baseline. Together these land within a third of a point for every face tried.
+    /// </summary>
+    private static double TextOffset(Para para, double pitchPoints, PageContent page, ExportOptions options)
+    {
+        if (para.Lines.Count == 0 || pitchPoints <= 0) return 0;
+        double size = para.Size;
+        var heights = para.Lines.Select(l => l.Bounds.Height * page.Size.Height).ToList();
+        double glyph = Median(heights);
+        var (value, rule) = LineSpacingFor(para, page, pitchPoints, options);
+
+        double baseline;
+        if (rule == DocxLineRule.Exact)
+        {
+            baseline = 0.8 * pitchPoints;
+        }
+        else
+        {
+            double ascent = options.FontMetrics?.Ascent(para.Lines[0].Style.FontFamily) ?? 0.92;
+            double multiple = rule == DocxLineRule.Auto && value > 0 ? value / 240.0 : 1;
+            baseline = Math.Min(1, multiple) * ascent * size;
+        }
+        return Math.Clamp(baseline - 0.75 * glyph, -size, size);
+    }
+
+    /// <summary>
+    /// A paragraph with its space before changed, and the pictures hung from it moved by as much: they are
+    /// placed from the top of that space, so without this they would stay put while the text moved.
+    /// </summary>
+    private static DocxParagraph WithSpaceBefore(DocxParagraph paragraph, int twips)
+    {
+        int delta = twips - paragraph.SpaceBeforeTwips;
+        if (delta == 0) return paragraph;
+        var floating = paragraph.Floating.Count == 0 ? paragraph.Floating
+            : [.. paragraph.Floating.Select(f => f.VerticalFromPage ? f : f with { OffsetYPoints = f.OffsetYPoints + delta / 20.0 })];
+        return paragraph with { SpaceBeforeTwips = twips, Floating = floating };
+    }
+
+    /// <summary>A gap under a point is measurement noise, not spacing anyone set.</summary>
+    private static int SpacingTwips(double points) => points < 1 ? 0 : PointsToTwips(points);
+
+    /// <summary>
+    /// Puts a block that belongs to no paragraph into the reading order: before the first block below it
+    /// that shares its horizontal extent, so a table or figure in the second column follows that column's
+    /// text above it rather than the first column's.
+    /// </summary>
+    private static void InsertByPosition(List<FlowItem> flow, FlowItem item)
+    {
+        var bounds = item.Bounds;
+
+        // Inside a column zone, the item belongs to the column it stands in, between that column's text
+        // above and below it — not to whichever column's text happens to come next in reading order.
+        int start = 0, end = flow.Count;
+        int zoneAt = flow.FindLastIndex(f => f is ZoneFlow z && z.Zone.Rect.Top <= bounds.Center.Y);
+        if (zoneAt >= 0 && flow[zoneAt] is ZoneFlow { Zone: var zone } && bounds.Center.Y <= zone.Rect.Bottom)
+        {
+            start = zoneAt + 1;
+            end = flow.FindIndex(start, f => f is ZoneFlow);
+            if (end < 0) end = flow.Count;
+            if (zone.IsColumns)
+            {
+                int column = 0;
+                double best = -1;
+                for (int i = 0; i < zone.Bands.Count; i++)
+                {
+                    double overlap = Math.Min(bounds.Right, zone.Bands[i].Right) - Math.Max(bounds.Left, zone.Bands[i].Left);
+                    if (overlap > best) (best, column) = (overlap, i);
+                }
+                for (int i = start, seen = 0; i < end; i++)
+                {
+                    if (flow[i] is not ColumnEndFlow) continue;
+                    if (seen == column - 1) start = i + 1;
+                    if (seen == column) { end = i; break; }
+                    seen++;
+                }
+            }
+        }
+        else if (zoneAt >= 0)
+        {
+            // Between zones: after the zone it follows, before the next one starts.
+            start = flow.FindIndex(zoneAt + 1, f => f is ZoneFlow) is var next and >= 0 ? next : flow.Count;
+            end = start;
+        }
+
+        int at = -1;
+        for (int i = start; i < end && at < 0; i++)
+            if (flow[i] is not (ZoneFlow or ColumnEndFlow) && flow[i].Bounds.Top >= bounds.Top - 1e-4 &&
+                OverlapsHorizontally(flow[i].Bounds, bounds)) at = i;
+        for (int i = start; i < end && at < 0; i++)
+            if (flow[i] is not (ZoneFlow or ColumnEndFlow) && flow[i].Bounds.Top >= bounds.Top - 1e-4) at = i;
+        flow.Insert(at < 0 ? end : at, item);
+    }
+
+    private static bool OverlapsHorizontally(RectD a, RectD b) => a.Left < b.Right && b.Left < a.Right;
+
+    private static bool OverlapsVertically(RectD a, RectD b, double fraction)
+    {
+        double overlap = Math.Min(a.Bottom, b.Bottom) - Math.Max(a.Top, b.Top);
+        return overlap > Math.Min(a.Height, b.Height) * fraction;
+    }
+
+    /// <summary>
+    /// The distance from one line's top to the next inside the paragraph, in points. A paragraph of one line
+    /// has none to measure, so it takes what the document uses for text of that size.
+    /// </summary>
+    private static double PitchOf(Para para, PageContent page, DocumentProfile profile)
+    {
+        double size = para.Size;
+        if (para.Lines.Count >= 2)
+        {
+            var steps = new List<double>(para.Lines.Count - 1);
+            for (int i = 1; i < para.Lines.Count; i++)
+                steps.Add((para.Lines[i].Bounds.Top - para.Lines[i - 1].Bounds.Top) * page.Size.Height);
+            double pitch = Median(steps);
+            if (pitch >= size * 0.85 && pitch <= size * 3) return pitch;
+        }
+        return profile.PitchFor(size);
     }
 
     /// <summary>
@@ -282,6 +669,7 @@ public static class ContentComposer
     {
         var text = page.Text;
         var lines = new List<Line>(text.Lines.Count);
+        var sources = new List<(TextLine Visual, string Raw)>(text.Lines.Count);
 
         foreach (var visual in text.Lines)
         {
@@ -297,7 +685,14 @@ public static class ContentComposer
             if (text.Source == TextSource.Ocr && raw.AsSpan().Trim().Equals(OcrLayout.FigurePlaceholder, StringComparison.Ordinal)) continue;
 
             lines.Add(Line.Create(page, visual, raw));
+            sources.Add((visual, raw));
         }
+
+        // Where parts of lines start on two or more lines of the page is a column of the text. Lines are
+        // read again knowing those, so an entry whose gap is narrower still lines up with the rest.
+        var shared = SharedStops(lines, page);
+        if (shared.Count > 0)
+            for (int i = 0; i < lines.Count; i++) lines[i] = Line.Create(page, sources[i].Visual, sources[i].Raw, shared);
 
         lines.Sort((a, b) =>
         {
@@ -305,6 +700,23 @@ public static class ContentComposer
             return byTop != 0 ? byTop : a.Bounds.Left.CompareTo(b.Bounds.Left);
         });
         return lines;
+    }
+
+    /// <summary>Tab stop positions found on at least two lines, within two points of each other.</summary>
+    private static List<double> SharedStops(List<Line> lines, PageContent page)
+    {
+        var all = lines.SelectMany((l, i) => l.TabStops.Select(x => (X: x, Line: i))).OrderBy(p => p.X).ToList();
+        var shared = new List<double>();
+        double tolerance = 2 / page.Size.Width;
+        int start = 0;
+        for (int i = 1; i <= all.Count; i++)
+        {
+            if (i < all.Count && all[i].X - all[i - 1].X <= tolerance) continue;
+            var cluster = all.Skip(start).Take(i - start).ToList();
+            if (cluster.Select(p => p.Line).Distinct().Count() >= 2) shared.Add(cluster.Average(p => p.X));
+            start = i;
+        }
+        return shared;
     }
 
     /// <summary>
@@ -315,8 +727,27 @@ public static class ContentComposer
     /// other way round would treat every line of an ordinary single-column page as a spanning line, because
     /// on such a page the text area and the line are the same width.
     /// </summary>
-    private static List<(RectD Column, List<Line> Lines)> SplitIntoColumns(
+    /// <summary>
+    /// A band of the page read as one: either a single measure, or columns side by side. <see cref="Units"/>
+    /// are read in order; for columns there is one per band, empty where a column has no text.
+    /// </summary>
+    private sealed record Zone(List<(RectD Column, List<Line> Lines)> Units, IReadOnlyList<(double Left, double Right)> Bands, RectD Rect)
+    {
+        public bool IsColumns => Bands.Count > 1;
+    }
+
+    private static List<Zone> SplitIntoZones(
         List<Line> lines, DocumentProfile profile, PageContent page, bool hasTables)
+    {
+        var zones = new List<Zone>();
+        var units = SplitIntoColumns(lines, profile, page, hasTables, zones);
+        if (zones.Count == 0 && units.Count > 0)
+            zones.Add(new Zone(units, [], Bounds(units.SelectMany(u => u.Lines))));
+        return zones;
+    }
+
+    private static List<(RectD Column, List<Line> Lines)> SplitIntoColumns(
+        List<Line> lines, DocumentProfile profile, PageContent page, bool hasTables, List<Zone> zones)
     {
         var units = new List<(RectD, List<Line>)>();
         if (lines.Count == 0) return units;
@@ -346,24 +777,37 @@ public static class ContentComposer
         var zone = new List<Line>();
         var spanning = new List<Line>();
 
+        // Word can set columns only where each is wide enough to hold a line of text; narrower bands are
+        // still read in order, one after the other, but as a single measure.
+        bool wordColumns = bands.All(b => b.Right - b.Left >= area.Width * 0.18);
+
         void FlushSpanning()
         {
             if (spanning.Count == 0) return;
             var bounds = Bounds(spanning);
-            units.Add((new RectD(area.Left, bounds.Top, area.Right, bounds.Bottom), [.. spanning]));
+            var rect = new RectD(area.Left, bounds.Top, area.Right, bounds.Bottom);
+            units.Add((rect, [.. spanning]));
+            zones.Add(new Zone([(rect, [.. spanning])], [], rect));
             spanning.Clear();
         }
 
         void FlushZone()
         {
             if (zone.Count == 0) return;
+            var bounds = Bounds(zone);
+            var zoneUnits = new List<(RectD, List<Line>)>();
             foreach (var band in bands)
             {
                 var members = zone.Where(l => l.Bounds.Center.X >= band.Left && l.Bounds.Center.X <= band.Right)
                                   .OrderBy(l => l.Bounds.Top).ToList();
-                if (members.Count > 0)
-                    units.Add((new RectD(band.Left, Bounds(members).Top, band.Right, Bounds(members).Bottom), members));
+                var rect = members.Count > 0
+                    ? new RectD(band.Left, Bounds(members).Top, band.Right, Bounds(members).Bottom)
+                    : new RectD(band.Left, bounds.Top, band.Right, bounds.Top);
+                if (members.Count > 0) units.Add((rect, members));
+                if (members.Count > 0 || wordColumns) zoneUnits.Add((rect, members));
             }
+            var zoneRect = new RectD(area.Left, bounds.Top, area.Right, bounds.Bottom);
+            zones.Add(wordColumns ? new Zone(zoneUnits, bands, zoneRect) : new Zone(zoneUnits, [], zoneRect));
             zone.Clear();
         }
 
@@ -462,6 +906,12 @@ public static class ContentComposer
         public required TextStyle Style { get; init; }
         public required bool AllBold { get; init; }
 
+        /// <summary>Characters that open a new part of the line after a gap no word space explains.</summary>
+        public IReadOnlyList<int> TabStarts { get; init; } = [];
+
+        /// <summary>Where each of those parts starts across the page, normalized.</summary>
+        public IReadOnlyList<double> TabStops { get; init; } = [];
+
         /// <summary>Left edge of the first non-space character, which is what an indent is measured from.</summary>
         public double TextLeft => Bounds.Left;
 
@@ -481,7 +931,7 @@ public static class ContentComposer
             return Create(page, new TextLine(start, end, bounds), raw);
         }
 
-        public static Line Create(PageContent page, TextLine visual, string raw)
+        public static Line Create(PageContent page, TextLine visual, string raw, IReadOnlyList<double>? knownStops = null)
         {
             // The dominant style of a line is the style of most of its characters: a line is rarely mixed,
             // and when it is, the majority is what the paragraph should inherit.
@@ -500,6 +950,7 @@ public static class ContentComposer
                 ? TextStyle.Default
                 : counts.OrderByDescending(p => p.Value).First().Key;
 
+            var (starts, stops) = TabGaps(page, visual.Start, visual.End, dominant.SizePoints, knownStops);
             return new Line
             {
                 Start = visual.Start,
@@ -508,7 +959,72 @@ public static class ContentComposer
                 Text = raw.Trim(),
                 Style = dominant,
                 AllBold = counted > 0 && bold >= counted * 0.8,
+                TabStarts = starts,
+                TabStops = stops,
             };
+        }
+
+        /// <summary>
+        /// Gaps inside a line far wider than its word spaces: the line is set in parts that line up with
+        /// the lines around it — a term and its definition, a label and its value, the cells of a table
+        /// drawn without rules. A gap counts only if it is both wider than two and a half em and three
+        /// and a half times the line's typical word space, which justified text never is: it stretches
+        /// every space of a line alike.
+        /// </summary>
+        private static (List<int> Starts, List<double> Stops) TabGaps(
+            PageContent page, int start, int end, double size, IReadOnlyList<double>? knownStops)
+        {
+            var words = new List<(int Start, RectD Box)>();
+            RectD previous = RectD.Empty;
+            int wordStart = -1;
+            for (int i = start; i < end; i++)
+            {
+                if (char.IsWhiteSpace(page.Text.Text[i]) || !page.Text.TryGetBox(i, out var box) || box.IsEmpty)
+                {
+                    if (wordStart >= 0) words.Add((wordStart, previous));
+                    wordStart = -1;
+                    continue;
+                }
+                if (wordStart < 0)
+                {
+                    wordStart = i;
+                    previous = box;
+                }
+                else previous = previous.Union(box);
+            }
+            if (wordStart >= 0) words.Add((wordStart, previous));
+            if (words.Count < 2) return ([], []);
+
+            double width = page.Size.Width;
+            var gaps = new List<double>(words.Count - 1);
+            for (int k = 1; k < words.Count; k++) gaps.Add((words[k].Box.Left - words[k - 1].Box.Right) * width);
+            // A word space is about a third of an em. The median gap says the same on a line of prose, but on a
+            // line of three words, one of them the gap in question, it is that gap.
+            double typical = Math.Min(Median([.. gaps]), size * 0.35);
+            double threshold = Math.Max(Math.Max(size * 2.5, typical * 3.5), 12);
+
+            // On its own width, a gap is a tab only beside ordinary word spaces: a justified line of two or
+            // three words has nothing but wide gaps, and none of them is a tab.
+            bool spaced = gaps.Any(g => g < threshold);
+
+            // A narrower gap still counts when the text after it starts exactly where other lines of the page
+            // start a part of theirs: a long term leaves less room before its definition, but the definition
+            // lines up with all the others.
+            double aligned = Math.Max(Math.Max(size * 0.4, typical * 1.5), 3);
+            double tolerance = 2 / width;
+
+            var starts = new List<int>();
+            var stops = new List<double>();
+            for (int k = 1; k < words.Count; k++)
+            {
+                bool tab = (spaced && gaps[k - 1] >= threshold) ||
+                           (gaps[k - 1] >= aligned && knownStops is not null &&
+                            knownStops.Any(x => Math.Abs(x - words[k].Box.Left) <= tolerance));
+                if (!tab) continue;
+                starts.Add(words[k].Start);
+                stops.Add(words[k].Box.Left);
+            }
+            return (starts, stops);
         }
     }
 
@@ -579,6 +1095,10 @@ public static class ContentComposer
         // because no line in it ever stops short of the others.
         if (OpensAListItem(line.Text)) return true;
 
+        // A line set in parts — a row of a table drawn without rules, a term and its definition — is an
+        // entry of its own; run into the line before, its parts would lose where they line up.
+        if (line.TabStarts.Count > 0) return true;
+
         // A clear jump down always ends the paragraph.
         double threshold = medianGap > 0 ? Math.Max(medianGap * ParagraphGapRatio, medianGap + height * 0.35) : height * 0.5;
         if (gap > threshold) return true;
@@ -595,18 +1115,72 @@ public static class ContentComposer
         // whether that word would have fitted. A fixed fraction of the measure gets this wrong constantly.
         double indentSlack = Math.Max(column.Width * ShortLineFraction, AverageCharWidth(previous) * 2);
         bool previousIsFlushLeft = previous.Bounds.Left <= column.Left + indentSlack;
+        double nextWord = FirstWordWidth(line, page) + AverageCharWidth(previous) * 0.6;
         if (previousIsFlushLeft)
         {
             double room = column.Right - previous.Bounds.Right;
-            double nextWord = FirstWordWidth(line, page) + AverageCharWidth(previous) * 0.6;
             if (room > nextWord || room > column.Width * 0.35) return true;
         }
+        else if (Math.Abs(previous.Bounds.Left - line.Bounds.Left) <= Math.Max(height * 0.3, 0.002) &&
+                 Math.Abs(previous.Bounds.Left - current[0].Bounds.Left) <= Math.Max(height * 0.3, 0.002))
+        {
+            // An indented block — a quotation, a note set in from both margins. Its lines share a left edge,
+            // and its measure is its own: room is judged against the widest line of the block, not the column.
+            double measure = Math.Max(current.Max(l => l.Bounds.Right), line.Bounds.Right);
+            if (measure - previous.Bounds.Right > nextWord) return true;
+        }
+        else if (IsCentred(previous.Bounds, column))
+        {
+            // Centred text can grow both ways, so its room is the whole measure less the line. Word wraps
+            // centred text only when the next word does not fit the full measure, so a centred line with room
+            // for it was ended on purpose: a title broken by its author, or a displayed formula with the
+            // text going on beneath it.
+            if (column.Width - previous.Bounds.Width > nextWord) return true;
+        }
 
-        // A first line indented from the block it follows starts a new paragraph.
+        // A first line indented from the block it follows starts a new paragraph — except the second line of
+        // a list item, which hangs at the text after the marker rather than under the marker itself.
         double blockLeft = current.Min(l => l.Bounds.Left);
-        if (line.Bounds.Left > blockLeft + height * 0.7) return true;
+        bool centredBlock = IsCentredBlock([.. current, line], column);
+        if (line.Bounds.Left > blockLeft + height * 0.7 && !centredBlock)
+        {
+            // A line under the last part of an entry set in parts — the rest of a definition, hanging under
+            // its first line — is the same entry.
+            double tolerance = Math.Max(height * 0.5, AverageCharWidth(previous));
+            bool underLastPart = current[0].TabStops.Count > 0 &&
+                                 Math.Abs(line.Bounds.Left - current[0].TabStops[^1]) <= tolerance;
+            if (!underLastPart &&
+                (HangingTextLeft(current[0], page) is not { } hanging || Math.Abs(line.Bounds.Left - hanging) > tolerance))
+                return true;
+        }
 
         return false;
+    }
+
+    /// <summary>
+    /// Clear of both edges of the column by about the same amount. Both have to be clear: a first line
+    /// indented a little and running to the right margin has its centre near the column's too, and taking
+    /// it for centred would cut every indented paragraph off from the rest of it.
+    /// </summary>
+    /// <summary>
+    /// Lines centred as a block: every one of them inset by the same amount from both edges of the column,
+    /// and at least one inset far enough to show it. Justified text fails on its indented first line and
+    /// its short last one, each inset on one side only; full lines alone prove nothing either way.
+    /// </summary>
+    private static bool IsCentredBlock(List<Line> lines, RectD column)
+    {
+        if (column.Width <= 0 || lines.Count == 0) return false;
+        double tolerance = column.Width * 0.02;
+        bool symmetric = lines.All(l => Math.Abs((l.Bounds.Left - column.Left) - (column.Right - l.Bounds.Right)) <= tolerance);
+        return symmetric && lines.Any(l => l.Bounds.Left - column.Left > column.Width * 0.015);
+    }
+
+    private static bool IsCentred(RectD line, RectD column)
+    {
+        if (column.Width <= 0) return false;
+        double left = line.Left - column.Left, right = column.Right - line.Right;
+        double margin = column.Width * 0.04;
+        return left > margin && right > margin && Math.Abs(left - right) <= column.Width * 0.03;
     }
 
     private static DocxAlignment DetectAlignment(Para para)
@@ -778,6 +1352,26 @@ public static class ContentComposer
     private static bool OpensAListItem(string text) =>
         BulletMarker.IsMatch(text) || NumberMarker.IsMatch(text);
 
+    /// <summary>
+    /// Where the text of a list item's first line starts, past its marker — the position its later lines
+    /// hang at. Null when the line does not open with a marker.
+    /// </summary>
+    private static double? HangingTextLeft(Line first, PageContent page)
+    {
+        var match = BulletMarker.Match(first.Text) is { Success: true } bullet ? bullet
+            : AmbiguousBullet.Match(first.Text) is { Success: true } dash ? dash
+            : NumberMarker.Match(first.Text);
+        if (!match.Success) return null;
+
+        string text = page.Text.Text;
+        int i = first.Start;
+        while (i < first.End && char.IsWhiteSpace(text[i])) i++;
+        i += match.Length;
+        for (; i < first.End; i++)
+            if (!char.IsWhiteSpace(text[i]) && page.Text.TryGetBox(i, out var box) && !box.IsEmpty) return box.Left;
+        return null;
+    }
+
     private static void MarkLists(List<Para> paragraphs)
     {
         var kinds = new DocxListKind[paragraphs.Count];
@@ -832,10 +1426,10 @@ public static class ContentComposer
 
     private static DocxParagraph BuildParagraph(
         Para para, PageContent page, PageExtras extras, DocumentProfile profile,
-        ExportOptions options, double previousBottom)
+        ExportOptions options, double gapPoints, double pitchPoints)
     {
         var runs = BuildRuns(para, page, extras, options);
-        double pageWidth = page.Size.Width, pageHeight = page.Size.Height;
+        double pageWidth = page.Size.Width;
 
         int indent = 0, firstLine = 0;
         if (para.List == DocxListKind.None)
@@ -852,22 +1446,62 @@ public static class ContentComposer
                 if (firstLine < 0) indent = PointsToTwips((rest - para.Column.Left) * pageWidth);
             }
         }
-
-        int spaceBefore = 0;
-        if (!double.IsNaN(previousBottom))
+        else if (ListTextLeft(para, page) is { } textLeft)
         {
-            double gapPoints = (para.Bounds.Top - previousBottom) * pageHeight;
-            double normal = profile.LinePitchPoints;
-            spaceBefore = PointsToTwips(Math.Clamp(gapPoints - normal * 0.45, 0, 36));
-            if (spaceBefore < 40) spaceBefore = 0;
+            // Where the marker and the text after it sit on the page. Word's own list indent is a fixed half
+            // inch with a quarter-inch hang, which a "100." does not fit in and a tight list is lost in.
+            double markerLeft = para.Lines[0].Bounds.Left;
+            indent = PointsToTwips((textLeft - para.Column.Left) * pageWidth);
+            firstLine = -PointsToTwips((textLeft - markerLeft) * pageWidth);
+            if (indent <= 0 || firstLine >= 0) indent = firstLine = 0;
         }
 
-        int lineSpacing = 0;
-        if (para.Lines.Count > 1)
+        // Text set out in the margin — a page number turned on its side, a note beside the column — would
+        // get an indent wider than the text area itself, and Word would then set it one letter to a line.
+        // Whatever the indent, the paragraph keeps room for a few words.
+        double measure = page.Size.Width - profile.Margins.Left - profile.Margins.Right;
+        int maxIndent = PointsToTwips(Math.Max(0, measure - Math.Max(72, measure * 0.25)));
+        if (indent > maxIndent)
         {
-            double pitch = (para.Lines[^1].Bounds.Top - para.Lines[0].Bounds.Top) / (para.Lines.Count - 1) * pageHeight;
-            double ratio = para.Size > 0 ? pitch / para.Size : 0;
-            if (ratio is > 1.05 and < 3.0) lineSpacing = PointsToTwips(pitch);
+            indent = maxIndent;
+            firstLine = Math.Max(firstLine, -indent);
+        }
+        if (indent + firstLine > maxIndent) firstLine = maxIndent - indent;
+
+        var (lineSpacing, lineRule) = LineSpacingFor(para, page, pitchPoints, options);
+
+        if (para.Alignment is DocxAlignment.Center or DocxAlignment.Right && para.List == DocxListKind.None)
+        {
+            // Centring is measured across the whole text area; an indent would move the centre with it.
+            indent = 0;
+            firstLine = 0;
+        }
+
+        // An entry set in parts: a tab stop where each part starts, and the lines after the first hanging
+        // at the last of them. A numbered entry keeps its number in the hang, with a stop where its text
+        // starts, so the number, the term and the definition each land where the page put them.
+        var tabStops = new List<DocxTabStop>();
+        if (para.Lines.Count > 0 && para.Lines[0].TabStops.Count > 0 && para.Alignment is not (DocxAlignment.Center or DocxAlignment.Right))
+        {
+            var first = para.Lines[0];
+            int Relative(double x) => PointsToTwips((x - para.Column.Left) * pageWidth);
+            if (para.List != DocxListKind.None && ListTextLeft(para, page) is { } textLeft && textLeft < first.TabStops[0])
+                tabStops.Add(new DocxTabStop(Relative(textLeft), DocxAlignment.Left));
+            foreach (double stop in first.TabStops.Take(first.TabStops.Count - 1))
+                tabStops.Add(new DocxTabStop(Relative(stop), DocxAlignment.Left));
+
+            int last = Relative(first.TabStops[^1]);
+            int start = Relative(first.Bounds.Left);
+            if (para.Lines.Count > 1 || para.List != DocxListKind.None)
+            {
+                // The last stop is the hanging indent, which Word treats as a stop of its own.
+                indent = last;
+                firstLine = start - last;
+            }
+            else
+            {
+                tabStops.Add(new DocxTabStop(last, DocxAlignment.Left));
+            }
         }
 
         return new DocxParagraph(runs)
@@ -877,14 +1511,83 @@ public static class ContentComposer
                 ? DocxAlignment.Left : para.Alignment,
             IndentTwips = Math.Max(0, indent),
             FirstLineTwips = firstLine,
-            SpaceBeforeTwips = spaceBefore,
-            LineSpacingTwips = lineSpacing,
-            ExplicitSpacing = options.PreserveLineBreaks,
+            SpaceBeforeTwips = SpacingTwips(gapPoints),
+            LineSpacing = lineSpacing,
+            LineRule = lineRule,
+            // Every gap is written, zero included: a paragraph that inherited the style's spacing would sit
+            // six points lower than the page put it, and a page of them overflows onto the next.
+            ExplicitSpacing = true,
+            TabStops = tabStops,
             List = para.List,
             ListLevel = para.ListLevel,
             ListMarker = para.List == DocxListKind.Number && para.MarkerLength > 0
                 ? para.Lines[0].Text[..para.MarkerLength].TrimEnd() : null,
+            MarkerStyle = para.List != DocxListKind.None ? MarkerStyleOf(para, page) : null,
         };
+    }
+
+    /// <summary>The style the list label was printed in: that of its first visible character.</summary>
+    private static TextStyle? MarkerStyleOf(Para para, PageContent page)
+    {
+        if (para.Lines.Count == 0 || para.MarkerLength <= 0) return null;
+        var line = para.Lines[0];
+        for (int i = line.Start; i < line.End; i++)
+        {
+            if (char.IsWhiteSpace(page.Text.Text[i])) continue;
+            // No larger than the text: Word sizes the first line to its label, so a bullet drawn a point
+            // bigger than the words beside it would open a point of extra space above every item.
+            var style = page.StyleAt(i);
+            return style with { SizePoints = Math.Min(style.SizePoints, para.Size) };
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Where a list item's text starts, after its marker: the left edge of the first character past the
+    /// marker, or of the item's second line, which hangs there. Null when neither can be measured.
+    /// </summary>
+    private static double? ListTextLeft(Para para, PageContent page)
+    {
+        if (para.Lines.Count == 0 || para.MarkerLength <= 0) return null;
+        var line = para.Lines[0];
+        string text = page.Text.Text;
+
+        int i = line.Start;
+        while (i < line.End && char.IsWhiteSpace(text[i])) i++;
+        i += para.MarkerLength;
+        while (i < line.End && char.IsWhiteSpace(text[i])) i++;
+        for (; i < line.End; i++)
+            if (!char.IsWhiteSpace(text[i]) && page.Text.TryGetBox(i, out var box) && !box.IsEmpty) return box.Left;
+
+        return para.Lines.Count > 1 ? para.Lines.Skip(1).Min(l => l.Bounds.Left) : null;
+    }
+
+    /// <summary>
+    /// The line spacing that reproduces the page's pitch. For an installed font it is a multiple of the
+    /// font's own line height — Word's "Multiple" — which still behaves when someone edits the text. For a
+    /// font Word will have to substitute, the multiple would be of a height nobody can know in advance, so
+    /// the pitch is written exactly; "at least" where a line mixes sizes and exact would clip the larger.
+    /// </summary>
+    private static (int Value, DocxLineRule Rule) LineSpacingFor(
+        Para para, PageContent page, double pitchPoints, ExportOptions options)
+    {
+        double size = para.Size;
+        if (size <= 0 || pitchPoints <= 0 || para.Lines.Count == 0) return (0, DocxLineRule.AtLeast);
+
+        bool uniform = true;
+        foreach (var line in para.Lines)
+        {
+            for (int i = line.Start; i < line.End && uniform; i++)
+                if (!char.IsWhiteSpace(page.Text.Text[i]) && page.StyleAt(i).SizePoints > size * 1.15) uniform = false;
+        }
+
+        if (uniform && options.FontMetrics?.LineHeight(para.Lines[0].Style.FontFamily) is { } factor && factor is > 0.5 and < 3)
+        {
+            int multiple = (int)Math.Round(pitchPoints / (factor * size) * 240);
+            return (Math.Clamp(multiple, 168, 960), DocxLineRule.Auto);
+        }
+
+        return (PointsToTwips(pitchPoints), uniform ? DocxLineRule.Exact : DocxLineRule.AtLeast);
     }
 
     private static List<DocxRun> BuildRuns(Para para, PageContent page, PageExtras extras, ExportOptions options)
@@ -894,6 +1597,10 @@ public static class ContentComposer
         RunKey? key = null;
         string text = page.Text.Text;
         double paraSize = para.Size;
+
+        // A centred or right-aligned block — a title, an address, a verse — is broken where its author broke
+        // it, and reflowing it would set it differently for no gain in editing: it is short by nature.
+        bool keepBreaks = options.PreserveLineBreaks || para.Alignment is DocxAlignment.Center or DocxAlignment.Right;
 
         void Flush()
         {
@@ -905,6 +1612,7 @@ public static class ContentComposer
                 Strikethrough = k.Strike,
                 Hyperlink = k.Link,
                 Highlight = k.Highlight,
+                CharacterSpacingTwips = k.Spacing,
             });
             buffer.Clear();
         }
@@ -921,17 +1629,41 @@ public static class ContentComposer
             while (from < to && char.IsWhiteSpace(text[from])) from++;
 
             bool joinedByHyphen = false;
-            if (!options.PreserveLineBreaks && index < para.Lines.Count - 1 && to > from && IsSoftHyphenBreak(text, from, to, para.Lines[index + 1], page))
+            if (!keepBreaks && index < para.Lines.Count - 1 && to > from && IsSoftHyphenBreak(text, from, to, para.Lines[index + 1], page))
             {
                 to--;                 // drop the hyphen: the word continues on the next line
                 joinedByHyphen = true;
             }
 
+            var tracking = Tracking(line, page);
+            bool tabs = line.TabStarts.Count > 0 && para.Alignment is not (DocxAlignment.Center or DocxAlignment.Right);
+
             for (int i = from; i < to; i++)
             {
                 char c = text[i];
                 if (c == '\n') continue;
-                var next = KeyFor(i, c, page, extras, para, line, paraSize, options);
+                if (tracking.Skip.Contains(i)) continue;
+
+                if (tabs && line.TabStarts.Contains(i))
+                {
+                    // The spaces of the gap give way to a tab, in whichever run they ended up.
+                    while (buffer.Length > 0 && buffer[^1] == ' ') buffer.Length--;
+                    if (buffer.Length == 0 && runs.Count > 0 && runs[^1].Text.EndsWith(' '))
+                        runs[^1] = runs[^1] with { Text = runs[^1].Text.TrimEnd(' ') };
+                    if (key is null) key = KeyFor(i, text[i], page, extras, para, line, paraSize, options) with { Spacing = tracking.Twips };
+                    buffer.Append('\t');
+                }
+
+                // A space takes the look of the text it follows. Given a run of its own it would carry
+                // whatever size and font the PDF drew it with — often none that matches either neighbour —
+                // and split the line into more runs than there are styles on it.
+                if (char.IsWhiteSpace(c) && key is not null)
+                {
+                    buffer.Append(c);
+                    continue;
+                }
+
+                var next = KeyFor(i, c, page, extras, para, line, paraSize, options) with { Spacing = tracking.Twips };
                 if (key is not { } k || !k.Equals(next))
                 {
                     Flush();
@@ -940,7 +1672,7 @@ public static class ContentComposer
                 buffer.Append(c);
             }
 
-            if (options.PreserveLineBreaks && index < para.Lines.Count - 1)
+            if (keepBreaks && index < para.Lines.Count - 1)
             {
                 buffer.Append('\n');
             }
@@ -959,7 +1691,65 @@ public static class ContentComposer
     }
 
     private readonly record struct RunKey(
-        TextStyle Style, DocxScript Script, bool Underline, bool Strike, string? Link, uint? Highlight);
+        TextStyle Style, DocxScript Script, bool Underline, bool Strike, string? Link, uint? Highlight)
+    {
+        public int Spacing { get; init; }
+    }
+
+    private static readonly (HashSet<int> Skip, int Twips) NoTracking = ([], 0);
+
+    /// <summary>
+    /// Letter-spaced text — "M O D E L  R E P O R T" set in tracked capitals — comes out of PDFium with a
+    /// space it invented between every two letters, because each gap is wider than it expects inside a
+    /// word. Those spaces are dropped and the spacing is carried as Word's own character spacing, so the
+    /// word is a word again: it reads, searches and spell-checks as one.
+    ///
+    /// Only generated spaces are touched — ones with no glyph box, that PDFium added itself. A line typed
+    /// with real spaces between single letters ("A B C D") keeps every one of them.
+    /// </summary>
+    private static (HashSet<int> Skip, int Twips) Tracking(Line line, PageContent page)
+    {
+        string text = page.Text.Text;
+        var spaces = new List<int>();
+        var gaps = new List<double>();
+        int letters = 0;
+
+        for (int i = line.Start; i < line.End; i++)
+        {
+            char c = text[i];
+            if (!char.IsWhiteSpace(c))
+            {
+                letters++;
+                continue;
+            }
+            if (page.Text.TryGetBox(i, out _)) continue;                     // a real space
+            if (i == line.Start || i + 1 >= line.End) continue;
+            if (!char.IsLetterOrDigit(text[i - 1]) || !char.IsLetterOrDigit(text[i + 1])) continue;
+
+            // Between two single letters: the one before is preceded by a space or the line start.
+            bool singleBefore = i - 2 < line.Start || char.IsWhiteSpace(text[i - 2]);
+            bool singleAfter = i + 2 >= line.End || char.IsWhiteSpace(text[i + 2]);
+            if (!singleBefore && !singleAfter) continue;
+            if (!page.Text.TryGetBox(i - 1, out var left) || !page.Text.TryGetBox(i + 1, out var right)) continue;
+
+            spaces.Add(i);
+            gaps.Add((right.Left - left.Right) * page.Size.Width);
+        }
+
+        // A handful of letters spread apart is tracking; one generated space in a line is just a gap.
+        if (spaces.Count < 3 || spaces.Count * 2 < letters - 1) return NoTracking;
+
+        // Between words the gap is the tracking twice over plus a word space, so it stands clear of the
+        // gaps inside words, which are the majority. Those wider spaces are word breaks and stay.
+        double typical = Median([.. gaps]);
+        double wordBreak = typical + Math.Max(typical * 0.5, line.Style.SizePoints * 0.15);
+        var skip = new HashSet<int>();
+        for (int k = 0; k < spaces.Count; k++)
+            if (gaps[k] <= wordBreak) skip.Add(spaces[k]);
+
+        double spacing = Math.Clamp(typical, 0, line.Style.SizePoints);
+        return (skip, PointsToTwips(spacing));
+    }
 
     private static RunKey KeyFor(
         int index, char c, PageContent page, PageExtras extras, Para para, Line line,
@@ -1047,6 +1837,8 @@ public static class ContentComposer
     {
         double snap = TableBuilder.SnapFor(profile.GlyphHeight);
         var rules = borders ? page.Rules : [];
+        var (thickness, color) = borders ? MeasureRules(grid, page) : (0, (uint?)null);
+        var (measuredPadding, topPadding) = borders ? MeasureCellPadding(grid, page, options) : (0, 0);
 
         var widths = new List<int>(grid.ColumnCount);
         for (int c = 0; c < grid.ColumnCount; c++)
@@ -1070,7 +1862,7 @@ public static class ContentComposer
                 bool startsMerge = borders && !continues && r + 1 < grid.RowCount &&
                                    !TableBuilder.HasHorizontalEdge(grid, rules, r + 1, c, snap);
 
-                cells.Add(new DocxCell(continues ? [] : CellBlocks(area, page, extras, profile, options))
+                cells.Add(new DocxCell(continues ? [] : CellBlocks(area, page, extras, profile, options, measuredPadding))
                 {
                     ColumnSpan = span,
                     VerticalMerge = continues ? 2 : startsMerge ? 1 : 0,
@@ -1079,13 +1871,108 @@ public static class ContentComposer
                 c += span;
             }
 
-            var row = new DocxRow(cells);
+            // The row is as tall as the page drew it: cell padding and rule spacing are part of its look, and
+            // a table sized to its text alone comes out cramped and a good deal shorter than the original.
+            // Word adds the rule and the cell's top margin to the height it is given — measured, not read —
+            // so both come off the pitch the page shows, or every row grows by them.
+            var row = new DocxRow(cells)
+            {
+                MinHeightTwips = borders
+                    ? Math.Max(0, PointsToTwips((grid.Rows[r + 1] - grid.Rows[r]) * page.Size.Height - thickness) - topPadding)
+                    : 0,
+            };
             // A first row set entirely in bold is a header row, and Word should repeat it across a page break.
             if (r == 0 && cells.Count > 1 && cells.All(IsBoldCell)) row = row with { IsHeader = true };
             rows.Add(row);
         }
 
-        return new DocxTable(rows, widths) { HasBorders = borders };
+        TrimEmptyEdgeRows(rows);
+        if (rows.Count > 0 && !rows[0].IsHeader && rows[0].Cells.Count > 1 && rows[0].Cells.All(IsBoldCell))
+            rows[0] = rows[0] with { IsHeader = true };
+
+        int padding = measuredPadding;
+        return new DocxTable(rows, widths)
+        {
+            HasBorders = borders,
+            BorderColor = color,
+            BorderEighths = Math.Clamp((int)Math.Round((thickness > 0 ? thickness : 0.5) * 8), 2, 96),
+            CellPaddingTwips = padding,
+            CellTopPaddingTwips = topPadding,
+            IndentTwips = TableIndent(grid.Columns[0], page, profile, borders ? 0 : padding),
+        };
+    }
+
+    /// <summary>The weight and colour of a table's rules: the typical one, since a table draws them all alike.</summary>
+    private static (double Thickness, uint? Color) MeasureRules(TableGrid grid, PageContent page)
+    {
+        var area = grid.Bounds.Inflate(0.003, 0.003);
+        var inside = page.Rules.Where(r => area.Contains(r.Bounds.Center)).ToList();
+        if (inside.Count == 0) return (0.5, null);
+
+        var widths = inside.Select(r => r.ThicknessPoints).Where(t => t > 0).ToList();
+        double thickness = widths.Count > 0 ? Math.Clamp(Median(widths), 0.25, 6) : 0.5;
+        uint color = inside.GroupBy(r => r.Color).OrderByDescending(g => g.Count()).First().Key;
+        return (thickness, color == 0 ? null : color);
+    }
+
+    /// <summary>
+    /// A row at the top or bottom of a table with nothing in any cell: the gap between a heading's underline
+    /// and the table's first rule, snapped into the grid because it lines up with it. It holds no content,
+    /// and kept it draws an empty row the page never had.
+    /// </summary>
+    private static void TrimEmptyEdgeRows(List<DocxRow> rows)
+    {
+        static bool Empty(DocxRow row) => row.Cells.All(c => c.Blocks.Count == 0 && c.VerticalMerge == 0);
+        static bool Continues(DocxRow row) => row.Cells.Any(c => c.VerticalMerge == 2);
+
+        while (rows.Count > 1 && Empty(rows[0]) && !Continues(rows[1])) rows.RemoveAt(0);
+        while (rows.Count > 1 && Empty(rows[^1])) rows.RemoveAt(rows.Count - 1);
+    }
+
+    /// <summary>
+    /// How far the text sits in from the left rule of its cell, from the cells that hold any: the padding
+    /// the PDF was laid out with. Word's own default is used when there is nothing to measure.
+    /// </summary>
+    private static (int Side, int Top) MeasureCellPadding(TableGrid grid, PageContent page, ExportOptions options)
+    {
+        var insets = new List<double>();
+        var tops = new List<double>();
+        for (int r = 0; r < grid.RowCount; r++)
+        {
+            for (int c = 0; c < grid.ColumnCount; c++)
+            {
+                var area = new RectD(grid.Columns[c], grid.Rows[r], grid.Columns[c + 1], grid.Rows[r + 1]);
+                var lines = LinesInside(page, area);
+                if (lines.Count == 0) continue;
+                insets.Add((lines.Min(l => l.Bounds.Left) - area.Left) * page.Size.Width);
+
+                // Above the text: its distance from the rule, less how far down its line Word sets a glyph.
+                var first = lines.OrderBy(l => l.Bounds.Top).First();
+                double size = first.Style.SizePoints;
+                double ascent = options.FontMetrics?.Ascent(first.Style.FontFamily) ?? 0.92;
+                double offset = ascent * size - 0.75 * first.Bounds.Height * page.Size.Height;
+                tops.Add((first.Bounds.Top - area.Top) * page.Size.Height - offset);
+            }
+        }
+        if (insets.Count == 0) return (108, 0);
+
+        // The smallest insets are the left-aligned cells; a centred cell's inset says nothing about padding.
+        // Likewise the smallest tops are the top-aligned cells.
+        insets.Sort();
+        tops.Sort();
+        double inset = insets[insets.Count / 4];
+        double top = tops[tops.Count / 4];
+        return (PointsToTwips(Math.Clamp(inset, 0, 14)), top < 1 ? 0 : PointsToTwips(Math.Min(top, 8)));
+    }
+
+    /// <summary>
+    /// The table's offset from the left margin. Word puts a table's left edge at the margin plus this indent,
+    /// so a table set in from the text, or pushed out into the margin, stays where it was.
+    /// </summary>
+    private static int TableIndent(double left, PageContent page, DocumentProfile profile, int textInsetTwips)
+    {
+        double points = left * page.Size.Width - profile.Margins.Left - textInsetTwips / 20.0;
+        return Math.Abs(points) < 1 ? 0 : PointsToTwips(points);
     }
 
     /// <summary>
@@ -1153,7 +2040,9 @@ public static class ContentComposer
         // A tagged table is a table whether or not it was ever drawn, so the borders follow the PDF: it
         // gets them if it drew them, and Word's own grid lines are not invented for one that did not.
         bool drawn = page.Rules.Any(r => table.Bounds.Inflate(0.01, 0.01).Contains(r.Bounds.Center));
-        return new DocxTable(rows, widths) { HasBorders = drawn };
+
+        // A tagged table's bounds are its text, so the default padding is put back outside it.
+        return new DocxTable(rows, widths) { HasBorders = drawn, IndentTwips = TableIndent(table.Bounds.Left, page, profile, 108) };
     }
 
     /// <summary>
@@ -1238,9 +2127,18 @@ public static class ContentComposer
         return best is 0xFFFFFF ? null : best;
     }
 
+    /// <summary>
+    /// The contents of a ruled cell. Its lines are judged against the cell's text area — inside the padding
+    /// on both sides — since that is where they wrapped: measured against the rules, every line that ended
+    /// at the padding would look short, and each would become a paragraph of its own.
+    /// </summary>
     private static List<DocxBlock> CellBlocks(
-        RectD area, PageContent page, PageExtras extras, DocumentProfile profile, ExportOptions options) =>
-        Compose(LinesInside(page, area), area, page, extras, profile, options);
+        RectD area, PageContent page, PageExtras extras, DocumentProfile profile, ExportOptions options, int paddingTwips)
+    {
+        double inset = Math.Min(paddingTwips / 20.0 / page.Size.Width, area.Width * 0.25);
+        var text = new RectD(area.Left + inset, area.Top, area.Right - inset, area.Bottom);
+        return Compose(LinesInside(page, area), text, page, extras, profile, options);
+    }
 
     /// <summary>
     /// The contents of a cell a tag describes. Its characters are known exactly, so they are cut by range
@@ -1278,12 +2176,25 @@ public static class ContentComposer
         if (lines.Count == 0) return [];
 
         var blocks = new List<DocxBlock>();
+        Para? previous = null;
+        double previousPitch = 0;
         foreach (var para in GroupParagraphs(lines, area, page))
         {
             para.Column = area;
-            var paragraph = BuildParagraph(para, page, extras, profile, options, double.NaN);
-            // Indents and spacing are measured against the page, which means nothing inside a cell.
-            blocks.Add(paragraph with { IndentTwips = 0, FirstLineTwips = 0, SpaceBeforeTwips = 0, LineSpacingTwips = 0 });
+
+            // A single line in a cell has no neighbour to measure its leading against, and none after it to
+            // take up any excess: whatever it is given, the row grows by. Its font's own single spacing is
+            // the height the page shows.
+            double pitch = para.Lines.Count > 1 ? PitchOf(para, page, profile)
+                : (options.FontMetrics?.LineHeight(para.Lines[0].Style.FontFamily) ?? 1.2) * para.Size;
+            double gap = previous is null ? 0
+                : Math.Clamp((para.Bounds.Top - previous.Lines[^1].Bounds.Top) * page.Size.Height - previousPitch +
+                             TextOffset(previous, previousPitch, page, options) - TextOffset(para, pitch, page, options), 0, 36);
+            var paragraph = BuildParagraph(para, page, extras, profile, options, gap, pitch);
+            // Indents are measured against the page's text area, which means nothing inside a cell.
+            blocks.Add(paragraph with { IndentTwips = 0, FirstLineTwips = 0 });
+            previous = para;
+            previousPitch = pitch;
         }
         return blocks;
     }
@@ -1328,45 +2239,264 @@ public static class ContentComposer
 
     // ---- images ----
 
-    private static void InsertImages(
-        List<DocxBlock> blocks, PageContent page, List<Para> paragraphs, DocumentProfile profile,
-        TagIndex tags, ExportOptions options)
+    /// <summary>
+    /// Decides how each picture sits against the text, the way the page shows it:
+    /// <list type="bullet">
+    /// <item>Text runs over it — a watermark, a tinted panel — so it goes behind the text, placed on the page.</item>
+    /// <item>Text runs beside it: a small one is an icon or a mark and floats in front at its exact spot; a
+    /// larger one is a figure the text wraps around.</item>
+    /// <item>Nothing beside it: it is a figure in the flow, a paragraph of its own between the text above
+    /// and below.</item>
+    /// </list>
+    /// Laid out inline regardless, a watermark pushes the page's text down by its own height and a column of
+    /// answer-choice circles becomes a column of pictures between the answers.
+    /// </summary>
+    private static void PlacePictures(
+        PageContent page, DocumentProfile profile, TagIndex tags, ExportOptions options,
+        List<FlowItem> flow, List<Floating> floating)
     {
+        double pageWidth = page.Size.Width, pageHeight = page.Size.Height;
+        var textLines = flow.OfType<ParaFlow>().SelectMany(p => p.Para.Lines.Select(l => (Line: l, p.Para))).ToList();
+        double iconLimit = Math.Max(profile.PitchFor(profile.BodySize) * 2.5, 20);
+
         foreach (var image in page.Images)
         {
             if (image.IsDrawing && !options.Drawings) continue;
 
-            double widthPoints = image.Bounds.Width * page.Size.Width;
-            double heightPoints = image.Bounds.Height * page.Size.Height;
+            var area = image.Bounds;
+            double widthPoints = area.Width * pageWidth;
+            double heightPoints = area.Height * pageHeight;
             if (widthPoints < 4 || heightPoints < 4) continue;
 
-            // A picture has to fit the text area in both directions, not just across. One a single point
-            // taller than the page holds pushes itself onto a page of its own and the text that belongs
-            // beside it onto the next — which is how a scan becomes twice as many pages as it started with.
-            double maxWidth = page.Size.Width - profile.Margins.Left - profile.Margins.Right;
-            double maxHeight = page.Size.Height - profile.Margins.Top - profile.Margins.Bottom - PictureHeadroom;
-            double scale = Math.Min(
-                maxWidth > 0 ? maxWidth / widthPoints : 1,
-                maxHeight > 0 ? maxHeight / heightPoints : 1);
-            if (scale < 1)
+            // A tagged PDF names its figures, and that description is the only thing in the document a
+            // screen reader can use once the picture has been carried across.
+            var picture = new DocxPicture(image, widthPoints, heightPoints) { AltText = tags.AltTextFor(image.MarkedContentId) };
+
+            // A line mostly inside the picture is text printed over it.
+            var over = textLines.Where(t => Covers(area, t.Line.Bounds)).ToList();
+            // Beside a line means sharing some of its height: an icon is often set a little above or below
+            // the text it marks, so a quarter of the smaller of the two is enough.
+            var beside = textLines.Where(t => !Covers(area, t.Line.Bounds) &&
+                                              OverlapsVertically(t.Line.Bounds, area, 0.25) &&
+                                              !OverlapsHorizontally(t.Line.Bounds, area)).ToList();
+
+            // Rasterized artwork keeps its labels as text, and those labels are inside it by nature. It is a
+            // figure in the flow, not a background, unless it is the size of the page. A picture standing in
+            // the band a running head occupies is the head's decoration — a rule, an ornament under the page
+            // number — and is placed where it was, behind the text, taking no room in the flow.
+            bool inBand = area.Bottom <= ContentComposerBands.Header || area.Top >= ContentComposerBands.Footer;
+            bool background = inBand || (over.Count > 0 && (!image.IsDrawing || area.Width * area.Height > 0.5));
+
+            if (background)
             {
-                widthPoints *= scale;
-                heightPoints *= scale;
+                var anchor = NearestPara(textLines, area.Center.Y);
+                floating.Add(new Floating(picture with
+                {
+                    Wrap = DocxWrap.BehindText,
+                    OffsetXPoints = area.Left * pageWidth,
+                    OffsetYPoints = area.Top * pageHeight,
+                    VerticalFromPage = true,
+                }, area, anchor));
+            }
+            else if (beside.Count > 0)
+            {
+                var anchor = beside.OrderBy(t => t.Line.Bounds.Top).First().Para;
+                floating.Add(new Floating(picture with
+                {
+                    Wrap = heightPoints <= iconLimit ? DocxWrap.InFrontOfText : DocxWrap.Square,
+                    OffsetXPoints = area.Left * pageWidth,
+                    OffsetYPoints = (area.Top - anchor.Bounds.Top) * pageHeight,
+                }, area, anchor));
+            }
+            else
+            {
+                InsertByPosition(flow, new PictureFlow(InlinePicture(picture, area, page, profile), area));
+            }
+        }
+
+        static bool Covers(RectD picture, RectD line)
+        {
+            var overlap = picture.Intersect(line);
+            return !overlap.IsEmpty && overlap.Width * overlap.Height > line.Width * line.Height * 0.5;
+        }
+
+        static Para? NearestPara(List<(Line Line, Para Para)> lines, double y) =>
+            lines.Count == 0 ? null : lines.OrderBy(t => Math.Abs(t.Line.Bounds.Center.Y - y)).First().Para;
+    }
+
+    /// <summary>A picture that is a paragraph of its own: sized to fit the text area, aligned as the page has it.</summary>
+    private static DocxPicture InlinePicture(DocxPicture picture, RectD area, PageContent page, DocumentProfile profile)
+    {
+        double widthPoints = picture.WidthPoints, heightPoints = picture.HeightPoints;
+
+        // A picture has to fit the text area in both directions, not just across. One a single point taller
+        // than the page holds pushes itself onto a page of its own and the text that belongs beside it onto
+        // the next — which is how a document becomes twice as many pages as it started with.
+        double maxWidth = page.Size.Width - profile.Margins.Left - profile.Margins.Right;
+        double maxHeight = page.Size.Height - profile.Margins.Top - profile.Margins.Bottom - PictureHeadroom;
+        double scale = Math.Min(
+            maxWidth > 0 ? maxWidth / widthPoints : 1,
+            maxHeight > 0 ? maxHeight / heightPoints : 1);
+        if (scale < 1)
+        {
+            widthPoints *= scale;
+            heightPoints *= scale;
+        }
+
+        double left = area.Left * page.Size.Width - profile.Margins.Left;
+        double right = page.Size.Width - profile.Margins.Right - area.Right * page.Size.Width;
+        var alignment = Math.Abs(left - right) <= Math.Max(12, maxWidth * 0.04) ? DocxAlignment.Center
+            : right < 6 && left > right ? DocxAlignment.Right
+            : DocxAlignment.Left;
+
+        return picture with
+        {
+            WidthPoints = widthPoints,
+            HeightPoints = heightPoints,
+            Alignment = alignment,
+            IndentTwips = alignment == DocxAlignment.Left && left > 2 && scale >= 1
+                ? PointsToTwips(Math.Min(left, maxWidth - widthPoints)) : 0,
+        };
+    }
+
+    /// <summary>
+    /// A rule standing on its own — the line under a title, a separator between sections — becomes a border
+    /// on the paragraph it belongs to: the one just above it, or failing that the one just below. A table's
+    /// rules are its own, a running head's belong to the head, and an underline is not a separator.
+    /// </summary>
+    private static void AttachRules(
+        List<DocxBlock> blocks, List<(Para Para, int Block)> placed, PageContent page, DocumentProfile profile,
+        List<RectD> tables)
+    {
+        if (page.Rules.Count == 0 || placed.Count == 0) return;
+        double width = page.Size.Width, height = page.Size.Height;
+        const double Reach = 24;   // points: further than this, the rule is not this paragraph's
+        var taken = new List<RectD>();
+
+        // The darkest stroke first: a PDF often lays a pale line and a darker one on the same spot, and the
+        // one the reader sees is the darker.
+        foreach (var rule in page.Rules.OrderBy(r => Luminance(r.Color)))
+        {
+            if (!rule.IsHorizontal) continue;
+            var bounds = rule.Bounds;
+
+            // The same line drawn twice, or drawn in segments, is one rule.
+            if (taken.Any(t => Math.Abs(t.Center.Y - bounds.Center.Y) * height < 1.5 && OverlapsHorizontally(t, bounds))) continue;
+            taken.Add(bounds);
+            if (bounds.Width * width < 36) continue;
+            if (bounds.Bottom <= ContentComposerBands.Header || bounds.Top >= ContentComposerBands.Footer) continue;
+            if (tables.Any(t => t.Inflate(0.004, 0.004).Contains(bounds.Center))) continue;
+
+            // An underline sits against the foot of a line of text no wider than it.
+            bool underline = placed.Any(p => p.Para.Lines.Any(l =>
+                bounds.Top >= l.Bounds.Bottom - 2 / height && bounds.Top <= l.Bounds.Bottom + 3 / height &&
+                bounds.Left >= l.Bounds.Left - 4 / width && bounds.Right <= l.Bounds.Right + 4 / width));
+            if (underline) continue;
+
+            var border = new DocxBorder(rule.Color,
+                Math.Clamp((int)Math.Round((rule.ThicknessPoints > 0 ? rule.ThicknessPoints : 0.75) * 8), 2, 96), 0);
+
+            var above = placed.Where(p => p.Para.Bounds.Bottom <= bounds.Top + 1 / height &&
+                                          OverlapsHorizontally(p.Para.Bounds, bounds))
+                              .OrderByDescending(p => p.Para.Bounds.Bottom).FirstOrDefault();
+            if (above.Para is not null && (bounds.Top - above.Para.Bounds.Bottom) * height <= Reach &&
+                blocks[above.Block] is DocxParagraph over)
+            {
+                // One rule to a gap: a second line in the same gap — the foot of one row and the head of the
+                // next drawn a point apart — would need room the gap does not have.
+                if (over.BorderBelow is not null) continue;
+
+                // Word keeps the distance in whole points, and a rule between paragraphs gets half of it on each
+                // side, so it is an even number of them.
+                double width2 = border.Eighths / 8.0;
+                double space = Math.Min(Math.Max(0, (bounds.Top - above.Para.Bounds.Bottom) * height),
+                                        Math.Max(0, Room(blocks, above.Block + 1) - width2));
+                space = 2 * Math.Floor(space / 2);
+                blocks[above.Block] = over with { BorderBelow = border with { SpacePoints = space } };
+                TakeSpace(blocks, above.Block + 1, space + width2, before: true);
+                continue;
             }
 
-            var picture = new DocxPicture(image, widthPoints, heightPoints)
+            var below = placed.Where(p => p.Para.Bounds.Top >= bounds.Bottom - 1 / height &&
+                                          OverlapsHorizontally(p.Para.Bounds, bounds))
+                              .OrderBy(p => p.Para.Bounds.Top).FirstOrDefault();
+            if (below.Para is not null && (below.Para.Bounds.Top - bounds.Bottom) * height <= Reach &&
+                blocks[below.Block] is DocxParagraph under && under.BorderAbove is null)
             {
-                Alignment = DocxAlignment.Center,
-                SpaceBeforeTwips = 120,
-                SpaceAfterTwips = 120,
-                // A tagged PDF names its figures, and that description is the only thing in the document
-                // a screen reader can use once the picture has been carried across.
-                AltText = tags.AltTextFor(image.MarkedContentId),
-            };
+                // Nor a rule over this paragraph when the one before it already has one under it.
+                if (below.Block > 0 && blocks[below.Block - 1] is DocxParagraph { BorderBelow: not null }) continue;
 
-            int at = paragraphs.FindIndex(p => p.Bounds.Top >= image.Bounds.Top);
-            if (at < 0 || at >= blocks.Count) blocks.Add(picture);
-            else blocks.Insert(at, picture);
+                double width2 = border.Eighths / 8.0;
+                double space = Math.Floor(Math.Min(Math.Max(0, (below.Para.Bounds.Top - bounds.Bottom) * height),
+                                                   Math.Max(0, Room(blocks, below.Block) - width2)));
+                blocks[below.Block] = under with { BorderAbove = border with { SpacePoints = space } };
+                TakeSpace(blocks, below.Block, space + width2, before: true);
+            }
+        }
+
+        // The spacing a border can take its room from: the gap before the block at index, whichever side
+        // of it the spacing was written on.
+        static double Room(List<DocxBlock> blocks, int index)
+        {
+            double room = 0;
+            if (index > 0 && index - 1 < blocks.Count && blocks[index - 1] is DocxParagraph previous) room += previous.SpaceAfterTwips / 20.0;
+            if (index < blocks.Count && blocks[index] is DocxParagraph next) room += next.SpaceBeforeTwips / 20.0;
+            else if (index < blocks.Count && blocks[index] is DocxPicture picture) room += picture.SpaceBeforeTwips / 20.0;
+            else if (index >= blocks.Count) room = 12;
+            return room;
+        }
+
+        static double Luminance(uint color) =>
+            0.299 * ((color >> 16) & 0xFF) + 0.587 * ((color >> 8) & 0xFF) + 0.114 * (color & 0xFF);
+
+        // A border takes room of its own, and the gap it now fills was measured into the spacing already.
+        static void TakeSpace(List<DocxBlock> blocks, int index, double points, bool before)
+        {
+            if (index <= 0 || index > blocks.Count) return;
+            int twips = PointsToTwips(points);
+            if (blocks[index - 1] is DocxParagraph previous && previous.SpaceAfterTwips > 0)
+            {
+                blocks[index - 1] = previous with { SpaceAfterTwips = Math.Max(0, previous.SpaceAfterTwips - twips) };
+                return;
+            }
+            if (index < blocks.Count && blocks[index] is DocxParagraph next)
+                blocks[index] = WithSpaceBefore(next, Math.Max(0, next.SpaceBeforeTwips - twips));
+            else if (index < blocks.Count && blocks[index] is DocxPicture picture)
+                blocks[index] = picture with { SpaceBeforeTwips = Math.Max(0, picture.SpaceBeforeTwips - twips) };
+        }
+    }
+
+    /// <summary>Hangs each floating picture off its paragraph, or off the page when the page has no text.</summary>
+    private static void AttachFloating(
+        List<DocxBlock> blocks, List<(Para Para, int Block)> placed, List<Floating> floating, PageContent page,
+        DocumentProfile profile, ExportOptions options)
+    {
+        foreach (var (picture, area, anchor) in floating)
+        {
+            int index = anchor is null ? -1 : placed.FindIndex(p => ReferenceEquals(p.Para, anchor));
+            if (index >= 0 && blocks[placed[index].Block] is DocxParagraph paragraph)
+            {
+                // Word measures from the top of the paragraph's space before, and its glyphs start a little
+                // way down their line; the offset was taken from the glyphs, so both are added back.
+                var placedPicture = picture.VerticalFromPage ? picture : picture with
+                {
+                    OffsetYPoints = picture.OffsetYPoints + paragraph.SpaceBeforeTwips / 20.0 +
+                                    TextOffset(anchor!, PitchOf(anchor!, page, profile), page, options),
+                };
+                blocks[placed[index].Block] = paragraph with { Floating = [.. paragraph.Floating, placedPicture] };
+                continue;
+            }
+
+            // No paragraph to hang it from: it is placed from the top of the page, in a paragraph that
+            // takes no room, so it stays exactly where it was.
+            blocks.Insert(0, picture with
+            {
+                Wrap = picture.Wrap == DocxWrap.Inline ? DocxWrap.InFrontOfText : picture.Wrap,
+                OffsetXPoints = area.Left * page.Size.Width,
+                OffsetYPoints = area.Top * page.Size.Height,
+                VerticalFromPage = true,
+            });
+            for (int i = 0; i < placed.Count; i++) placed[i] = (placed[i].Para, placed[i].Block + 1);
         }
     }
 
@@ -1415,59 +2545,218 @@ public static class ContentComposer
 
     // ---- sections ----
 
+    /// <summary>
+    /// A page that ends with this much of its text area still empty was ended on purpose — a title page,
+    /// the end of a chapter — and the next page starts a new one in Word too. A page that ends lower ran
+    /// out of room, and Word, which never sets the text quite as the PDF did, is left to paginate it.
+    /// </summary>
+    private const double DeliberateBreakSpace = 0.22;
+
     private static List<DocxSection> BuildSections(
-        List<(PageContent Page, List<DocxBlock> Blocks)> composed, DocumentProfile profile, ExportOptions options)
+        List<ComposedPage> composed, DocumentProfile profile, ExportOptions options)
     {
         var sections = new List<DocxSection>();
         if (composed.Count == 0)
             return [new DocxSection(new PageSize(612, 792), DocxMargins.Default, [DocxParagraph.Empty])];
 
+        int typicalGap = TypicalParagraphGap(composed);
         var blocks = new List<DocxBlock>();
         var size = composed[0].Page.Size;
-        int previousPage = -2;
+        var columns = DocxColumns.Single;
+        bool continuous = false;
+        ComposedPage? previous = null;
 
-        foreach (var (page, pageBlocks) in composed)
+        void Close()
         {
-            if (options.PreservePageBreaks && pageBlocks.Count == 0) pageBlocks.Add(DocxParagraph.Empty);
-            bool sizeChanged = Math.Abs(page.Size.Width - size.Width) > 1 || Math.Abs(page.Size.Height - size.Height) > 1;
-            bool needsSection = options.PreservePageBreaks && pageBlocks.FirstOrDefault() is not DocxParagraph;
-            if ((sizeChanged || needsSection) && blocks.Count > 0)
-            {
-                sections.Add(MakeSection(size, blocks, profile, options));
-                blocks = [];
-                size = page.Size;
-            }
-
-            if (options.PreservePageBreaks && blocks.Count > 0 && pageBlocks[0] is DocxParagraph first)
-                pageBlocks[0] = first with { PageBreakBefore = true };
-
-            if (!options.PreservePageBreaks && options.JoinAcrossPages && page.PageIndex == previousPage + 1 &&
-                blocks.Count > 0 && pageBlocks.Count > 0 &&
-                blocks[^1] is DocxParagraph tail && pageBlocks[0] is DocxParagraph head &&
-                ContinuesAcrossPages(tail, head))
-            {
-                blocks[^1] = JoinParagraphs(tail, head);
-                blocks.AddRange(pageBlocks.Skip(1));
-            }
-            else
-            {
-                blocks.AddRange(pageBlocks);
-            }
-            previousPage = page.PageIndex;
+            sections.Add(MakeSection(size, blocks, profile, options, sections.Count == 0, columns, continuous));
+            blocks = [];
         }
 
-        sections.Add(MakeSection(size, blocks, profile, options));
+        foreach (var current in composed)
+        {
+            var page = current.Page;
+            var pageBlocks = current.Blocks;
+
+            // The layout the page opens with. A page without columns opens with a single measure, which ends
+            // a run of column pages before it.
+            var opening = DocxColumns.Single;
+            if (pageBlocks.Count > 0 && pageBlocks[0] is ZoneBreak zone)
+            {
+                opening = zone.Columns;
+                pageBlocks.RemoveAt(0);
+            }
+
+            bool sizeChanged = Math.Abs(page.Size.Width - size.Width) > 1 || Math.Abs(page.Size.Height - size.Height) > 1;
+            if (sizeChanged && blocks.Count > 0)
+            {
+                // A section break starts a new page by itself.
+                Close();
+                size = page.Size;
+                continuous = false;
+                columns = opening;
+            }
+
+            // A sentence that visibly runs on to the next page settles it: the author did not end the page.
+            bool runsOn = options.JoinAcrossPages && options.PageBreaks != PageBreakMode.EveryPage &&
+                previous is not null && page.PageIndex == previous.Page.PageIndex + 1 &&
+                blocks.Count > 0 && blocks[^1] is DocxParagraph lastTail &&
+                pageBlocks.Count > 0 && pageBlocks[0] is DocxParagraph firstHead &&
+                ContinuesAcrossPages(lastTail, firstHead);
+            bool pageBreak = previous is not null && !sizeChanged && !runsOn && StartsNewPage(previous, current, profile, options);
+
+            // Another layout needs a section of its own. Where the page also starts a new page, the section
+            // break is the page break; where the text runs on, the section continues on the same page.
+            bool breakBySection = false;
+            if (!opening.SameAs(columns))
+            {
+                if (blocks.Count > 0 && !sizeChanged)
+                {
+                    Close();
+                    continuous = !pageBreak;
+                    breakBySection = pageBreak;
+                }
+                columns = opening;
+            }
+            // Where the page's text starts well down it — a chapter opening, a title set low — the space
+            // above it is part of the layout, and at the top of a page Word keeps it.
+            double drop = double.IsNaN(current.ContentTop) ? 0
+                : (current.ContentTop * page.Size.Height) - profile.Margins.Top;
+            int before = drop > profile.PitchFor(profile.BodySize) * 2 ? SpacingTwips(Math.Min(drop, page.Size.Height / 2)) : 0;
+
+            if (pageBreak || (sizeChanged && previous is not null) || (previous is null && before > 0))
+            {
+                if (pageBlocks.Count == 0 || pageBlocks[0] is not DocxParagraph)
+                    pageBlocks.Insert(0, Spacer);
+
+                var first = (DocxParagraph)pageBlocks[0];
+                pageBlocks[0] = WithSpaceBefore(first, Math.Max(before, first.SpaceBeforeTwips)) with
+                {
+                    PageBreakBefore = pageBreak && !breakBySection,
+                };
+            }
+            else if (previous is not null && pageBlocks.Count > 0)
+            {
+                if (options.JoinAcrossPages && page.PageIndex == previous.Page.PageIndex + 1 &&
+                    blocks.Count > 0 && blocks[^1] is DocxParagraph tail && pageBlocks[0] is DocxParagraph head &&
+                    ContinuesAcrossPages(tail, head))
+                {
+                    blocks[^1] = JoinParagraphs(tail, head);
+                    pageBlocks.RemoveAt(0);
+                }
+                else if (pageBlocks[0] is DocxParagraph { Style: DocxParagraphStyle.Body, SpaceBeforeTwips: 0 } starting &&
+                         blocks.Count > 0 && blocks[^1] is DocxParagraph closing &&
+                         !(starting.List != DocxListKind.None && closing.List != DocxListKind.None))
+                {
+                    // The page boundary hid the gap between two paragraphs; in one flow it has to be put back.
+                    pageBlocks[0] = WithSpaceBefore(starting, typicalGap);
+                }
+            }
+
+            // Where the layout changes on the page itself — a headline over two columns, the columns, the
+            // text under them — each part becomes a section of its own, continuing on the same page.
+            foreach (var block in pageBlocks)
+            {
+                if (block is ZoneBreak change)
+                {
+                    if (!change.Columns.SameAs(columns))
+                    {
+                        if (blocks.Count > 0)
+                        {
+                            Close();
+                            continuous = true;
+                        }
+                        columns = change.Columns;
+                    }
+                    continue;
+                }
+                blocks.Add(block);
+            }
+            if (pageBlocks.Any(b => b is not ZoneBreak) || previous is null) previous = current;
+        }
+
+        Close();
         return sections;
     }
 
+    /// <summary>A paragraph that takes no room, for where Word needs one and the layout has none.</summary>
+    private static DocxParagraph Spacer { get; } = new([])
+    {
+        ExplicitSpacing = true,
+        LineSpacing = 20,
+        LineRule = DocxLineRule.Exact,
+    };
+
+    private static bool StartsNewPage(ComposedPage previous, ComposedPage current, DocumentProfile profile, ExportOptions options)
+    {
+        if (options.PageBreaks == PageBreakMode.EveryPage) return true;
+        if (options.PageBreaks == PageBreakMode.None) return false;
+
+        // Pages left out of the export: whatever was on them, the text does not run on across the gap.
+        if (current.Page.PageIndex != previous.Page.PageIndex + 1) return true;
+        if (double.IsNaN(previous.ContentBottom)) return true;
+
+        double height = previous.Page.Size.Height;
+        double areaTop = profile.Margins.Top / height;
+        double areaBottom = 1 - profile.Margins.Bottom / height;
+        double area = areaBottom - areaTop;
+        if (area <= 0) return false;
+
+        double free = (areaBottom - previous.ContentBottom) / area;
+        if (free >= DeliberateBreakSpace) return true;
+
+        // A page whose text starts well down it is a chapter opening or a part title, set low on a page of
+        // its own: whatever came before, it starts a new one.
+        if (!double.IsNaN(current.ContentTop) &&
+            (current.ContentTop - profile.Margins.Top / current.Page.Size.Height) / area >= 0.15)
+            return true;
+
+        // A page set lower than the text area's top and ending short of its foot was composed as a page — a
+        // cover, a title page — however little room either end leaves on its own.
+        double drop = double.IsNaN(previous.ContentTop) ? 0 : Math.Max(0, (previous.ContentTop - areaTop) / area);
+        if (free >= 0.08 && free + drop >= 0.25) return true;
+
+        // A new chapter starts a new page, and a page ending with room to spare before one was ended for it.
+        return free >= 0.1 &&
+               current.Blocks.FirstOrDefault(b => b is not ZoneBreak) is DocxParagraph { Style: DocxParagraphStyle.Heading1 };
+    }
+
+    /// <summary>
+    /// The gap the document puts between paragraphs, when it puts one at all: most paragraphs carry it, so
+    /// it is a style rather than an accident. Books that indent instead of spacing have none.
+    /// </summary>
+    private static int TypicalParagraphGap(List<ComposedPage> composed)
+    {
+        var gaps = new List<double>();
+        int body = 0;
+        foreach (var page in composed)
+        {
+            for (int i = 1; i < page.Blocks.Count; i++)
+            {
+                if (page.Blocks[i] is not DocxParagraph { Style: DocxParagraphStyle.Body, List: DocxListKind.None } paragraph ||
+                    page.Blocks[i - 1] is not DocxParagraph { Style: DocxParagraphStyle.Body }) continue;
+                body++;
+                if (paragraph.SpaceBeforeTwips > 0) gaps.Add(paragraph.SpaceBeforeTwips);
+            }
+        }
+        return gaps.Count * 2 > body ? (int)Median(gaps) : 0;
+    }
+
     private static DocxSection MakeSection(
-        PageSize size, List<DocxBlock> blocks, DocumentProfile profile, ExportOptions options)
+        PageSize size, List<DocxBlock> blocks, DocumentProfile profile, ExportOptions options, bool first,
+        DocxColumns columns, bool continuous)
     {
         if (blocks.Count == 0) blocks.Add(DocxParagraph.Empty);
         return new DocxSection(size, profile.Margins, blocks)
         {
+            Columns = columns,
+            Continuous = continuous && !first,
             Header = options.HeadersFooters ? profile.Header : null,
             Footer = options.HeadersFooters ? profile.Footer : null,
+            DifferentFirstPage = first && options.HeadersFooters && profile.FirstPageUnheaded,
+            FirstHeader = first && options.HeadersFooters ? profile.FirstHeader : null,
+            FirstFooter = first && options.HeadersFooters ? profile.FirstFooter : null,
+            HeaderDistancePoints = profile.HeaderDistance,
+            FooterDistancePoints = profile.FooterDistance,
         };
     }
 
@@ -1479,6 +2768,9 @@ public static class ContentComposer
     {
         if (tail.Style != DocxParagraphStyle.Body || head.Style != DocxParagraphStyle.Body) return false;
         if (tail.List != DocxListKind.None || head.List != DocxListKind.None) return false;
+
+        // Pictures hung from the head are placed from its top, which joining would move up a page.
+        if (head.Floating.Count > 0) return false;
 
         string a = tail.Text.TrimEnd(), b = head.Text.TrimStart();
         if (a.Length == 0 || b.Length == 0) return false;

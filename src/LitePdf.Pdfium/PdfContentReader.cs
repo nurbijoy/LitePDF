@@ -68,7 +68,9 @@ public sealed unsafe partial class PdfiumDocument
 
     // ---- text ----
 
-    private readonly record struct CharRecord(uint Code, RectD Box, TextStyle Style, bool Invisible, int MarkedContentId);
+    /// <param name="Inherited">A character PDFium generated, whose style is borrowed from the text around it.</param>
+    private readonly record struct CharRecord(
+        uint Code, RectD Box, TextStyle Style, bool Invisible, int MarkedContentId, bool Inherited = false);
 
     private sealed record StyledText(
         PageText Text, List<StyledSpan> Spans, List<MarkedRange> Marks, List<EmbeddedFont> Fonts, bool FromInvisibleLayer)
@@ -107,6 +109,17 @@ public sealed unsafe partial class PdfiumDocument
 
                 bool generated = code != '\n' && FPDFText_IsGenerated(textPage, i) == 1;
                 nint textObject = FPDFText_GetTextObject(textPage, i);
+
+                // A space PDFium inserted between two text objects belongs to neither, and PDFium reports
+                // its default size of one point for it. Written out at that size the space vanishes and the
+                // words either side of it run together, which is every style change in a Word-made PDF.
+                // It is spacing in the text it sits in, so it takes that text's style.
+                if (generated || textObject == 0)
+                {
+                    records.Add(new CharRecord(code, RectD.Empty, style, lastInvisible, lastMarkedContentId, Inherited: true));
+                    continue;
+                }
+
                 if (textObject != lastObject)
                 {
                     lastObject = textObject;
@@ -139,6 +152,11 @@ public sealed unsafe partial class PdfiumDocument
 
                 records.Add(new CharRecord(code, box, style, lastInvisible, lastMarkedContentId));
             }
+
+            // Generated characters before the first real one had nothing to borrow from yet.
+            int firstReal = records.FindIndex(r => !r.Inherited);
+            for (int i = 0; i < firstReal; i++)
+                records[i] = records[i] with { Style = records[firstReal].Style, Invisible = records[firstReal].Invisible };
 
             // A searchable scan carries its whole text in an invisible layer under the picture. Keeping both
             // would write every word twice; keeping neither would lose the page. So the layer is used only
@@ -438,7 +456,11 @@ public sealed unsafe partial class PdfiumDocument
     {
         if (IsRule(bounds, out bool horizontal))
         {
-            scan.Rules.Add(new RuleSegment(bounds, horizontal));
+            scan.Rules.Add(new RuleSegment(bounds, horizontal)
+            {
+                Color = RuleColor(obj),
+                ThicknessPoints = RuleThickness(obj, bounds, horizontal, context.Size),
+            });
             return;
         }
 
@@ -568,6 +590,30 @@ public sealed unsafe partial class PdfiumDocument
     }
 
     /// <summary>A rule is long in one direction and hairline in the other: a table edge or an underline.</summary>
+    /// <summary>The colour a rule is drawn in: its fill when it is a thin filled box, its stroke when it is a line.</summary>
+    private static uint RuleColor(nint obj)
+    {
+        int fillMode = 0, stroke = 0;
+        uint r = 0, g = 0, b = 0, a = 255;
+        bool filled = FPDFPath_GetDrawMode(obj, &fillMode, &stroke) != 0 && fillMode != FPDF_FILLMODE_NONE;
+        bool read = filled
+            ? FPDFPageObj_GetFillColor(obj, &r, &g, &b, &a) != 0
+            : FPDFPageObj_GetStrokeColor(obj, &r, &g, &b, &a) != 0;
+        return read ? ((r & 0xFF) << 16) | ((g & 0xFF) << 8) | (b & 0xFF) : 0;
+    }
+
+    /// <summary>
+    /// How thick a rule is, in points. A filled box is as thick as it is across; a stroked line has no
+    /// width of its own, so its stroke width is it.
+    /// </summary>
+    private static double RuleThickness(nint obj, RectD bounds, bool horizontal, PageSize size)
+    {
+        double across = horizontal ? bounds.Height * size.Height : bounds.Width * size.Width;
+        if (across >= 0.1) return across;
+        float width = 0;
+        return FPDFPageObj_GetStrokeWidth(obj, &width) != 0 && width > 0 ? width : 0;
+    }
+
     private static bool IsRule(RectD bounds, out bool horizontal)
     {
         const double Thin = 0.004;  // about 3 pt on a Letter page
@@ -596,8 +642,10 @@ public sealed unsafe partial class PdfiumDocument
         var bounds = task.Bounds;
 
         // A JPEG in the PDF is a JPEG in the .docx: the bytes are copied across without being decoded,
-        // so a photograph survives the conversion exactly and the file stays small.
-        if (IsPlainJpeg(obj))
+        // so a photograph survives the conversion exactly and the file stays small. Not when a mask cuts
+        // it out, though: the stored bytes then hold the parts the page never shows — the black square
+        // around a round icon — and only the rendered image is what the reader saw.
+        if (IsPlainJpeg(obj) && !IsMasked(page, obj))
         {
             uint length = FPDFImageObj_GetImageDataDecoded(obj, null, 0);
             if (length > 0 && length <= budget)
@@ -758,6 +806,38 @@ public sealed unsafe partial class PdfiumDocument
     /// True when the image is a single DCTDecode stream, which is exactly a JPEG file. A soft mask or a
     /// second filter means the stored bytes are not what the page shows, so those are rendered instead.
     /// </summary>
+    /// <summary>
+    /// True when the image is drawn through a mask. PDFium exposes no way to ask, but its rendering of the
+    /// image composites the mask into the alpha channel, so transparency inside the image is the answer.
+    /// The outermost pixels are left out: placement on a fractional pixel softens every edge a little.
+    /// </summary>
+    private bool IsMasked(nint page, nint obj)
+    {
+        nint bitmap = FPDFImageObj_GetRenderedBitmap(_document, page, obj);
+        if (bitmap == 0) return false;
+        try
+        {
+            if (FPDFBitmap_GetFormat(bitmap) != FPDFBitmap_BGRA) return false;
+            int width = FPDFBitmap_GetWidth(bitmap), height = FPDFBitmap_GetHeight(bitmap);
+            int stride = FPDFBitmap_GetStride(bitmap);
+            byte* buffer = (byte*)FPDFBitmap_GetBuffer(bitmap);
+            if (buffer is null || width < 3 || height < 3) return false;
+
+            long clear = 0, total = (long)(width - 2) * (height - 2);
+            for (int y = 1; y < height - 1; y++)
+            {
+                byte* row = buffer + (long)y * stride;
+                for (int x = 1; x < width - 1; x++)
+                    if (row[x * 4 + 3] < 250) clear++;
+            }
+            return clear > total / 100;
+        }
+        finally
+        {
+            FPDFBitmap_Destroy(bitmap);
+        }
+    }
+
     private static bool IsPlainJpeg(nint obj)
     {
         if (FPDFImageObj_GetImageFilterCount(obj) != 1) return false;

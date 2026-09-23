@@ -40,7 +40,7 @@ public sealed class DocxExportEndToEndTests
         await using var document = await PdfiumDocument.OpenAsync(Samples.TextPdf());
         var pages = await ReadAllAsync(document);
         TextPdfExport.Validate(pages);
-        var options = ExportOptions.Default with { PreserveLineBreaks = true, PreservePageBreaks = true };
+        var options = ExportOptions.Default with { PreserveLineBreaks = true, PageBreaks = PageBreakMode.EveryPage };
         using var package = DocxPackage.Write(ContentComposer.Compose(pages, options: options));
         package.AssertValid();
         Assert.Equal(Visible(string.Concat(pages.Select(p => p.Text.Text))), Visible(package.AllText()));

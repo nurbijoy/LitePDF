@@ -46,7 +46,14 @@ public sealed record PlacedImage(RectD Bounds, byte[]? Encoded, string? Extensio
 }
 
 /// <summary>A thin filled or stroked line: a table rule, an underline, a box edge.</summary>
-public readonly record struct RuleSegment(RectD Bounds, bool IsHorizontal);
+public readonly record struct RuleSegment(RectD Bounds, bool IsHorizontal)
+{
+    /// <summary>The rule's colour as 0xRRGGBB. Black when the PDF did not say.</summary>
+    public uint Color { get; init; }
+
+    /// <summary>How thick the rule is drawn, in points; 0 when unknown.</summary>
+    public double ThicknessPoints { get; init; }
+}
 
 /// <summary>
 /// A filled rectangle drawn behind something: a shaded table cell, a banded row, a coloured panel.

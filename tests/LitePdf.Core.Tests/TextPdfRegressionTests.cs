@@ -28,7 +28,7 @@ public sealed class TextPdfRegressionTests
             .Line($"Page {p + 1}, first full line of text.", 0.1, 0.2, 0.9)
             .Line($"Page {p + 1}, second full line of text.", 0.1, 0.223, 0.9)
             .Build(p)).ToList();
-        var options = ExportOptions.Default with { PreserveLineBreaks = true, PreservePageBreaks = true };
+        var options = ExportOptions.Default with { PreserveLineBreaks = true, PageBreaks = PageBreakMode.EveryPage };
         using var package = DocxPackage.Write(ContentComposer.Compose(pages, options: options));
         package.AssertValid();
         Assert.Equal(3, package.Document.Descendants(W + "br").Count());
@@ -143,7 +143,13 @@ public sealed class TextPdfRegressionTests
         var text = new PageBuilder().Line("Hi", 0.1, 0.1, 0.2).Image(new RectD(0.2, 0.2, 0.6, 0.6)).Build();
         TextPdfExport.Validate([text, PageContent.Empty(1, text.Size)]);
         var scan = new PageBuilder().Image(new RectD(0, 0, 1, 1)).Build(4);
-        Assert.Contains("Page 5", Assert.Throws<NotSupportedException>(() => TextPdfExport.Validate([text, scan])).Message);
+        // Text beside a scan: the exception names the page so the rest can be offered for conversion.
+        var mixed = Assert.Throws<UnsupportedPagesException>(() => TextPdfExport.Validate([text, scan]));
+        Assert.Contains("Page 5", mixed.Message);
+        Assert.Equal([4], mixed.Pages);
+        Assert.Equal(2, mixed.SelectedCount);
+        // A scan alone: nothing to offer.
+        Assert.Throws<NotSupportedException>(() => TextPdfExport.Validate([scan]));
         Assert.Throws<NotSupportedException>(() => TextPdfExport.Validate([text with { IsSearchableScan = true }]));
         Assert.Throws<NotSupportedException>(() => TextPdfExport.Validate([PageContent.Empty(0, text.Size)]));
         Assert.Throws<NotSupportedException>(() => TextPdfExport.Validate([text with

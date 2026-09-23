@@ -59,6 +59,7 @@ public static class DocxWriter
         WritePart(zip, "docProps/app.xml", WriteAppProps);
         WritePart(zip, "word/styles.xml", w => WriteStyles(w, document));
         WritePart(zip, "word/numbering.xml", w => WriteNumbering(w, parts));
+        WritePart(zip, "word/settings.xml", WriteSettings);
         WritePart(zip, "word/_rels/document.xml.rels", w => WriteDocumentRels(w, parts));
         WritePart(zip, "word/document.xml", w => WriteDocument(w, document, parts));
 
@@ -118,7 +119,7 @@ public static class DocxWriter
         private readonly Dictionary<string, MediaPart> _mediaByHash = [];
         private readonly Dictionary<PlacedImage, MediaPart> _mediaByImage = [];
         private readonly Dictionary<string, string> _hyperlinks = new(StringComparer.Ordinal);
-        private int _nextId = 3; // rId1 = styles, rId2 = numbering
+        private int _nextId = 4; // rId1 = styles, rId2 = numbering, rId3 = settings
         private int _headerCount;
         private int _footerCount;
         private int _drawingId;
@@ -152,6 +153,8 @@ public static class DocxWriter
                             AddImage(picture.Image, encoder);
                             break;
                         case DocxParagraph paragraph:
+                            foreach (var floating in paragraph.Floating)
+                                AddImage(floating.Image, encoder);
                             foreach (var run in paragraph.Runs)
                                 if (run.Hyperlink is { Length: > 0 } uri && !_hyperlinks.ContainsKey(uri))
                                     _hyperlinks[uri] = NextId();
@@ -159,10 +162,12 @@ public static class DocxWriter
                     }
                 }
 
-                if (section.Header is { } header)
-                    HeaderParts.Add(($"word/header{++_headerCount}.xml", new HeaderPart(NextId(), header, true)));
-                if (section.Footer is { } footer)
-                    HeaderParts.Add(($"word/footer{++_footerCount}.xml", new HeaderPart(NextId(), footer, false)));
+                foreach (var header in (DocxHeaderFooter?[])[section.Header, section.DifferentFirstPage ? section.FirstHeader : null])
+                    if (header is not null && !HeaderParts.Any(p => ReferenceEquals(p.Part.Content, header)))
+                        HeaderParts.Add(($"word/header{++_headerCount}.xml", new HeaderPart(NextId(), header, true)));
+                foreach (var footer in (DocxHeaderFooter?[])[section.Footer, section.DifferentFirstPage ? section.FirstFooter : null])
+                    if (footer is not null && !HeaderParts.Any(p => ReferenceEquals(p.Part.Content, footer)))
+                        HeaderParts.Add(($"word/footer{++_footerCount}.xml", new HeaderPart(NextId(), footer, false)));
             }
 
             HasComments = document.Comments.Count > 0;
@@ -301,6 +306,7 @@ public static class DocxWriter
         Override("/word/document.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml");
         Override("/word/styles.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml");
         Override("/word/numbering.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml");
+        Override("/word/settings.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml");
         if (parts.HasComments)
             Override("/word/comments.xml", "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml");
         if (parts.Fonts.Count > 0)
@@ -332,6 +338,30 @@ public static class DocxWriter
         }
     }
 
+    /// <summary>
+    /// Declares the document as current Word. Without it Word opens the file in "Compatibility Mode" as a
+    /// Word 2007 document: the title bar says so, newer features are switched off, and tables are laid out
+    /// by the old rules, shifted left by their cell margin.
+    /// </summary>
+    private static void WriteSettings(XmlWriter w)
+    {
+        w.WriteStartElement("w", "settings", WNs);
+        w.WriteStartElement("w", "defaultTabStop", WNs);
+        w.WriteAttributeString("w", "val", WNs, "720");
+        w.WriteEndElement();
+        w.WriteStartElement("w", "characterSpacingControl", WNs);
+        w.WriteAttributeString("w", "val", WNs, "doNotCompress");
+        w.WriteEndElement();
+        w.WriteStartElement("w", "compat", WNs);
+        w.WriteStartElement("w", "compatSetting", WNs);
+        w.WriteAttributeString("w", "name", WNs, "compatibilityMode");
+        w.WriteAttributeString("w", "uri", WNs, "http://schemas.microsoft.com/office/word");
+        w.WriteAttributeString("w", "val", WNs, "15");
+        w.WriteEndElement();
+        w.WriteEndElement();
+        w.WriteEndElement();
+    }
+
     private static void WriteRootRels(XmlWriter w)
     {
         w.WriteStartElement("Relationships", PkgRelNs);
@@ -346,6 +376,7 @@ public static class DocxWriter
         w.WriteStartElement("Relationships", PkgRelNs);
         Relationship(w, "rId1", RNs + "/styles", "styles.xml");
         Relationship(w, "rId2", RNs + "/numbering", "numbering.xml");
+        Relationship(w, "rId3", RNs + "/settings", "settings.xml");
         foreach (var media in parts.Media)
             Relationship(w, media.RelationshipId, RNs + "/image", $"media/{media.FileName}");
         foreach (var (uri, id) in parts.Hyperlinks)
@@ -457,10 +488,30 @@ public static class DocxWriter
         w.WriteEndElement();
         w.WriteEndElement();
 
+        // Word's own default table style. Without it a table has no cell margins at all.
+        w.WriteStartElement("w", "style", WNs);
+        w.WriteAttributeString("w", "type", WNs, "table");
+        w.WriteAttributeString("w", "default", WNs, "1");
+        w.WriteAttributeString("w", "styleId", WNs, "TableNormal");
+        Val("name", "Normal Table");
+        w.WriteStartElement("w", "tblPr", WNs);
+        w.WriteStartElement("w", "tblCellMar", WNs);
+        foreach (var (edge, value) in (ReadOnlySpan<(string, string)>)[("top", "0"), ("left", "108"), ("bottom", "0"), ("right", "108")])
+        {
+            w.WriteStartElement("w", edge, WNs);
+            w.WriteAttributeString("w", "w", WNs, value);
+            w.WriteAttributeString("w", "type", WNs, "dxa");
+            w.WriteEndElement();
+        }
+        w.WriteEndElement();
+        w.WriteEndElement();
+        w.WriteEndElement();
+
         w.WriteStartElement("w", "style", WNs);
         w.WriteAttributeString("w", "type", WNs, "table");
         w.WriteAttributeString("w", "styleId", WNs, "TableGrid");
         Val("name", "Table Grid");
+        Val("basedOn", "TableNormal");
         w.WriteStartElement("w", "tblPr", WNs);
         WriteTableBorders(w);
         w.WriteEndElement();
@@ -519,16 +570,16 @@ public static class DocxWriter
         }
     }
 
-    private static void WriteTableBorders(XmlWriter w)
+    private static void WriteTableBorders(XmlWriter w, int eighths = 4, uint? color = null)
     {
         w.WriteStartElement("w", "tblBorders", WNs);
         foreach (string edge in (string[])["top", "left", "bottom", "right", "insideH", "insideV"])
         {
             w.WriteStartElement("w", edge, WNs);
             w.WriteAttributeString("w", "val", WNs, "single");
-            w.WriteAttributeString("w", "sz", WNs, "4");
+            w.WriteAttributeString("w", "sz", WNs, Math.Clamp(eighths, 2, 96).ToString());
             w.WriteAttributeString("w", "space", WNs, "0");
-            w.WriteAttributeString("w", "color", WNs, "auto");
+            w.WriteAttributeString("w", "color", WNs, color is { } c ? Hex(c) : "auto");
             w.WriteEndElement();
         }
         w.WriteEndElement();
@@ -666,26 +717,17 @@ public static class DocxWriter
 
             // A section that is not the last carries its properties on its final paragraph, so the break
             // happens there. Word requires a paragraph to hang them on, and a table may not be last.
-            bool needsTrailingParagraph = blocks.Count == 0 || blocks[^1] is DocxTable ||
-                (!last && blocks[^1] is not DocxParagraph);
-
-            for (int i = 0; i < blocks.Count; i++)
+            bool endsWithParagraph = blocks.Count > 0 && blocks[^1] is DocxParagraph;
+            if (!last && endsWithParagraph)
             {
-                if (!last && i == blocks.Count - 1 && blocks[i] is DocxParagraph paragraph)
-                    WriteParagraph(w, paragraph, parts, section);
-                else WriteBlock(w, blocks[i], parts);
+                WriteBlocks(w, blocks.Take(blocks.Count - 1).ToList(), parts);
+                WriteParagraph(w, (DocxParagraph)blocks[^1], parts, section);
             }
-
-            if (needsTrailingParagraph)
+            else
             {
-                w.WriteStartElement("w", "p", WNs);
-                if (!last)
-                {
-                    w.WriteStartElement("w", "pPr", WNs);
-                    WriteSectionProperties(w, section, parts);
-                    w.WriteEndElement();
-                }
-                w.WriteEndElement();
+                WriteBlocks(w, blocks, parts);
+                if (!last) WriteSpacerParagraph(w, section, parts);
+                else if (blocks.Count == 0 || blocks[^1] is DocxTable) WriteSpacerParagraph(w);
             }
 
             if (last) WriteSectionProperties(w, section, parts);
@@ -699,18 +741,17 @@ public static class DocxWriter
     {
         w.WriteStartElement("w", "sectPr", WNs);
 
-        if (section.Header is { } header)
+        Reference("headerReference", "default", section.Header);
+        Reference("footerReference", "default", section.Footer);
+        if (section.DifferentFirstPage)
         {
-            w.WriteStartElement("w", "headerReference", WNs);
-            w.WriteAttributeString("w", "type", WNs, "default");
-            w.WriteAttributeString("r", "id", RNs, parts.HeaderId(header));
-            w.WriteEndElement();
+            Reference("headerReference", "first", section.FirstHeader);
+            Reference("footerReference", "first", section.FirstFooter);
         }
-        if (section.Footer is { } footer)
+        if (section.Continuous)
         {
-            w.WriteStartElement("w", "footerReference", WNs);
-            w.WriteAttributeString("w", "type", WNs, "default");
-            w.WriteAttributeString("r", "id", RNs, parts.HeaderId(footer));
+            w.WriteStartElement("w", "type", WNs);
+            w.WriteAttributeString("w", "val", WNs, "continuous");
             w.WriteEndElement();
         }
 
@@ -726,15 +767,14 @@ public static class DocxWriter
         w.WriteAttributeString("w", "right", WNs, Twips(margins.Right).ToString());
         w.WriteAttributeString("w", "bottom", WNs, Twips(margins.Bottom).ToString());
         w.WriteAttributeString("w", "left", WNs, Twips(margins.Left).ToString());
-        w.WriteAttributeString("w", "header", WNs, Twips(Math.Min(margins.Top / 2, 36)).ToString());
-        w.WriteAttributeString("w", "footer", WNs, Twips(Math.Min(margins.Bottom / 2, 36)).ToString());
+        // A running head that sits lower than the text area's top would push the body down in Word, so the
+        // distance can never exceed the margin it lives in.
+        w.WriteAttributeString("w", "header", WNs, Twips(Math.Clamp(section.HeaderDistancePoints, 0, Math.Max(0, margins.Top - 6))).ToString());
+        w.WriteAttributeString("w", "footer", WNs, Twips(Math.Clamp(section.FooterDistancePoints, 0, Math.Max(0, margins.Bottom - 6))).ToString());
         w.WriteAttributeString("w", "gutter", WNs, "0");
         w.WriteEndElement();
 
-        w.WriteStartElement("w", "cols", WNs);
-        w.WriteAttributeString("w", "space", WNs, "708");
-        w.WriteEndElement();
-
+        // Schema order: pgNumType, then cols, then titlePg.
         if (section.PageNumberStart > 0)
         {
             w.WriteStartElement("w", "pgNumType", WNs);
@@ -742,6 +782,50 @@ public static class DocxWriter
             w.WriteEndElement();
         }
 
+        WriteColumns(w, section.Columns);
+
+        if (section.DifferentFirstPage) w.WriteElementString("w", "titlePg", WNs, null);
+
+        w.WriteEndElement();
+
+        void Reference(string element, string type, DocxHeaderFooter? content)
+        {
+            if (content is null) return;
+            w.WriteStartElement("w", element, WNs);
+            w.WriteAttributeString("w", "type", WNs, type);
+            w.WriteAttributeString("r", "id", RNs, parts.HeaderId(content));
+            w.WriteEndElement();
+        }
+    }
+
+    private static void WriteColumns(XmlWriter w, DocxColumns columns)
+    {
+        w.WriteStartElement("w", "cols", WNs);
+        if (columns.IsSingle)
+        {
+            w.WriteAttributeString("w", "space", WNs, "708");
+            w.WriteEndElement();
+            return;
+        }
+
+        w.WriteAttributeString("w", "num", WNs, columns.Count.ToString());
+        w.WriteAttributeString("w", "space", WNs, Twips(Math.Max(0, columns.SpacePoints)).ToString());
+        bool unequal = columns.WidthsPoints.Count == columns.Count;
+        w.WriteAttributeString("w", "equalWidth", WNs, unequal ? "0" : "1");
+        if (unequal)
+        {
+            for (int i = 0; i < columns.Count; i++)
+            {
+                w.WriteStartElement("w", "col", WNs);
+                w.WriteAttributeString("w", "w", WNs, Twips(Math.Max(36, columns.WidthsPoints[i])).ToString());
+                if (i < columns.Count - 1)
+                {
+                    double gap = i < columns.GapsPoints.Count ? columns.GapsPoints[i] : columns.SpacePoints;
+                    w.WriteAttributeString("w", "space", WNs, Twips(Math.Max(0, gap)).ToString());
+                }
+                w.WriteEndElement();
+            }
+        }
         w.WriteEndElement();
     }
 
@@ -766,6 +850,14 @@ public static class DocxWriter
         w.WriteStartElement("w", "p", WNs);
         WriteParagraphProperties(w, paragraph, parts, section);
 
+        foreach (var picture in paragraph.Floating)
+        {
+            if (parts.Image(picture.Image) is null) continue;
+            w.WriteStartElement("w", "r", WNs);
+            WriteDrawing(w, picture, parts);
+            w.WriteEndElement();
+        }
+
         foreach (int id in paragraph.CommentIds) Marker(w, "commentRangeStart", id);
 
         foreach (var run in paragraph.Runs)
@@ -781,6 +873,15 @@ public static class DocxWriter
             {
                 WriteRun(w, run, hyperlinkStyle: false);
             }
+        }
+
+        if (paragraph.ColumnBreakAfter)
+        {
+            w.WriteStartElement("w", "r", WNs);
+            w.WriteStartElement("w", "br", WNs);
+            w.WriteAttributeString("w", "type", WNs, "column");
+            w.WriteEndElement();
+            w.WriteEndElement();
         }
 
         foreach (int id in paragraph.CommentIds)
@@ -877,9 +978,10 @@ public static class DocxWriter
     {
         bool hasStyle = paragraph.Style != DocxParagraphStyle.Body;
         bool hasIndent = paragraph.IndentTwips != 0 || paragraph.FirstLineTwips != 0;
-        bool hasSpacing = paragraph.ExplicitSpacing || paragraph.SpaceBeforeTwips != 0 || paragraph.SpaceAfterTwips != 0 || paragraph.LineSpacingTwips != 0;
+        bool hasSpacing = paragraph.ExplicitSpacing || paragraph.SpaceBeforeTwips != 0 || paragraph.SpaceAfterTwips != 0 || paragraph.LineSpacing != 0;
         bool hasList = paragraph.List != DocxListKind.None;
-        if (!hasStyle && !hasIndent && !hasSpacing && !hasList &&
+        if (!hasStyle && !hasIndent && !hasSpacing && !hasList && !paragraph.KeepWithNext && paragraph.MarkerStyle is null &&
+            paragraph.BorderAbove is null && paragraph.BorderBelow is null && paragraph.TabStops.Count == 0 &&
             paragraph.Alignment == DocxAlignment.Left && !paragraph.PageBreakBefore && section is null)
             return;
 
@@ -890,6 +992,7 @@ public static class DocxWriter
             w.WriteAttributeString("w", "val", WNs, paragraph.Style.ToString());
             w.WriteEndElement();
         }
+        if (paragraph.KeepWithNext) w.WriteElementString("w", "keepNext", WNs, null);
         if (paragraph.PageBreakBefore) w.WriteElementString("w", "pageBreakBefore", WNs, null);
         if (hasList)
         {
@@ -902,15 +1005,22 @@ public static class DocxWriter
             w.WriteEndElement();
             w.WriteEndElement();
         }
+        WriteParagraphBorders(w, paragraph.BorderAbove, paragraph.BorderBelow);
+        WriteTabs(w, paragraph.TabStops);
         if (hasSpacing)
         {
             w.WriteStartElement("w", "spacing", WNs);
             if (paragraph.ExplicitSpacing || paragraph.SpaceBeforeTwips != 0) w.WriteAttributeString("w", "before", WNs, paragraph.SpaceBeforeTwips.ToString());
             if (paragraph.ExplicitSpacing || paragraph.SpaceAfterTwips != 0) w.WriteAttributeString("w", "after", WNs, paragraph.SpaceAfterTwips.ToString());
-            if (paragraph.LineSpacingTwips != 0)
+            if (paragraph.LineSpacing != 0)
             {
-                w.WriteAttributeString("w", "line", WNs, paragraph.LineSpacingTwips.ToString());
-                w.WriteAttributeString("w", "lineRule", WNs, "atLeast");
+                w.WriteAttributeString("w", "line", WNs, paragraph.LineSpacing.ToString());
+                w.WriteAttributeString("w", "lineRule", WNs, paragraph.LineRule switch
+                {
+                    DocxLineRule.Auto => "auto",
+                    DocxLineRule.Exact => "exact",
+                    _ => "atLeast",
+                });
             }
             w.WriteEndElement();
         }
@@ -934,6 +1044,29 @@ public static class DocxWriter
             });
             w.WriteEndElement();
         }
+        if (hasList && paragraph.MarkerStyle is { } marker)
+        {
+            // The paragraph mark's look, which is what Word draws the list label in.
+            w.WriteStartElement("w", "rPr", WNs);
+            w.WriteStartElement("w", "rFonts", WNs);
+            w.WriteAttributeString("w", "ascii", WNs, marker.FontFamily);
+            w.WriteAttributeString("w", "hAnsi", WNs, marker.FontFamily);
+            w.WriteAttributeString("w", "cs", WNs, marker.FontFamily);
+            w.WriteEndElement();
+            if (marker.Bold) w.WriteElementString("w", "b", WNs, null);
+            if (marker.Italic) w.WriteElementString("w", "i", WNs, null);
+            w.WriteStartElement("w", "color", WNs);
+            w.WriteAttributeString("w", "val", WNs, Hex(marker.Color));
+            w.WriteEndElement();
+            string half = Math.Clamp((int)Math.Round(marker.SizePoints * 2), 2, 3276).ToString();
+            w.WriteStartElement("w", "sz", WNs);
+            w.WriteAttributeString("w", "val", WNs, half);
+            w.WriteEndElement();
+            w.WriteStartElement("w", "szCs", WNs);
+            w.WriteAttributeString("w", "val", WNs, half);
+            w.WriteEndElement();
+            w.WriteEndElement();
+        }
         if (section is not null) WriteSectionProperties(w, section, parts);
         w.WriteEndElement();
     }
@@ -954,19 +1087,20 @@ public static class DocxWriter
         w.WriteAttributeString("w", "hAnsi", WNs, run.Style.FontFamily);
         w.WriteAttributeString("w", "cs", WNs, run.Style.FontFamily);
         w.WriteEndElement();
+        // Schema order: b, i, strike, color, spacing, sz, szCs, highlight, u, vertAlign.
         if (run.Style.Bold) w.WriteElementString("w", "b", WNs, null);
         if (run.Style.Italic) w.WriteElementString("w", "i", WNs, null);
-        if (run.Underline)
-        {
-            w.WriteStartElement("w", "u", WNs);
-            w.WriteAttributeString("w", "val", WNs, "single");
-            w.WriteEndElement();
-        }
         if (run.Strikethrough) w.WriteElementString("w", "strike", WNs, null);
         if (!hyperlinkStyle)
         {
             w.WriteStartElement("w", "color", WNs);
             w.WriteAttributeString("w", "val", WNs, Hex(run.Style.Color));
+            w.WriteEndElement();
+        }
+        if (run.CharacterSpacingTwips != 0)
+        {
+            w.WriteStartElement("w", "spacing", WNs);
+            w.WriteAttributeString("w", "val", WNs, Math.Clamp(run.CharacterSpacingTwips, -1000, 1000).ToString());
             w.WriteEndElement();
         }
         int halfPoints = Math.Clamp((int)Math.Round(run.Style.SizePoints * 2), 2, 3276);
@@ -980,6 +1114,12 @@ public static class DocxWriter
         {
             w.WriteStartElement("w", "highlight", WNs);
             w.WriteAttributeString("w", "val", WNs, NearestHighlight(highlight));
+            w.WriteEndElement();
+        }
+        if (run.Underline)
+        {
+            w.WriteStartElement("w", "u", WNs);
+            w.WriteAttributeString("w", "val", WNs, "single");
             w.WriteEndElement();
         }
         if (run.Script != DocxScript.Baseline)
@@ -1045,7 +1185,82 @@ public static class DocxWriter
         Flush();
     }
 
+    /// <summary>An inline picture, as a paragraph of its own.</summary>
     private static void WritePicture(XmlWriter w, DocxPicture picture, PackageParts parts)
+    {
+        if (parts.Image(picture.Image) is null) return;
+
+        if (picture.Wrap != DocxWrap.Inline)
+        {
+            // A floating picture with no paragraph to hang from gets one that takes no room.
+            w.WriteStartElement("w", "p", WNs);
+            w.WriteStartElement("w", "pPr", WNs);
+            w.WriteStartElement("w", "spacing", WNs);
+            w.WriteAttributeString("w", "before", WNs, "0");
+            w.WriteAttributeString("w", "after", WNs, "0");
+            w.WriteAttributeString("w", "line", WNs, "20");
+            w.WriteAttributeString("w", "lineRule", WNs, "exact");
+            w.WriteEndElement();
+            w.WriteEndElement();
+            w.WriteStartElement("w", "r", WNs);
+            WriteDrawing(w, picture, parts);
+            w.WriteEndElement();
+            w.WriteEndElement();
+            return;
+        }
+
+        w.WriteStartElement("w", "p", WNs);
+        w.WriteStartElement("w", "pPr", WNs);
+
+        // The paragraph is exactly as tall as the picture. Inherited spacing would stretch it: a multiple
+        // applies to a picture as it does to text, and a 200 pt figure at 1.08 lines gains 16 pt.
+        w.WriteStartElement("w", "spacing", WNs);
+        w.WriteAttributeString("w", "before", WNs, picture.SpaceBeforeTwips.ToString());
+        w.WriteAttributeString("w", "after", WNs, picture.SpaceAfterTwips.ToString());
+        w.WriteAttributeString("w", "line", WNs, "240");
+        w.WriteAttributeString("w", "lineRule", WNs, "auto");
+        w.WriteEndElement();
+        if (picture.Alignment == DocxAlignment.Left && picture.IndentTwips > 0)
+        {
+            w.WriteStartElement("w", "ind", WNs);
+            w.WriteAttributeString("w", "left", WNs, picture.IndentTwips.ToString());
+            w.WriteEndElement();
+        }
+        if (picture.Alignment != DocxAlignment.Left)
+        {
+            w.WriteStartElement("w", "jc", WNs);
+            w.WriteAttributeString("w", "val", WNs, picture.Alignment == DocxAlignment.Right ? "right" : "center");
+            w.WriteEndElement();
+        }
+        // The picture sits on the baseline, and below it the line keeps its font's descent. At one point
+        // that is a fifth of a point, and the paragraph is as tall as the picture it holds.
+        WriteTinyMark(w);
+        w.WriteEndElement();
+
+        w.WriteStartElement("w", "r", WNs);
+        WriteTinyMark(w);
+        WriteDrawing(w, picture with { Wrap = DocxWrap.Inline }, parts);
+        w.WriteEndElement();
+        w.WriteEndElement();
+
+        static void WriteTinyMark(XmlWriter w)
+        {
+            w.WriteStartElement("w", "rPr", WNs);
+            w.WriteStartElement("w", "sz", WNs);
+            w.WriteAttributeString("w", "val", WNs, "2");
+            w.WriteEndElement();
+            w.WriteStartElement("w", "szCs", WNs);
+            w.WriteAttributeString("w", "val", WNs, "2");
+            w.WriteEndElement();
+            w.WriteEndElement();
+        }
+    }
+
+    /// <summary>
+    /// The <c>w:drawing</c> for a picture: <c>wp:inline</c> in the flow, or <c>wp:anchor</c> positioned from
+    /// the page's left edge and from the anchoring paragraph's top (or the page's). The caller supplies the run.
+    /// </summary>
+    private static void WriteDrawing(XmlWriter w, DocxPicture picture, PackageParts parts)
     {
         if (parts.Image(picture.Image) is not { } media) return;
 
@@ -1054,31 +1269,45 @@ public static class DocxWriter
         long cy = Math.Max(1, (long)Math.Round(picture.HeightPoints * EmuPerPoint));
         string name = media.FileName;
         int id = parts.NextDrawingId();
+        bool inline = picture.Wrap == DocxWrap.Inline;
 
-        w.WriteStartElement("w", "p", WNs);
-        if (picture.Alignment != DocxAlignment.Left || picture.SpaceBeforeTwips != 0 || picture.SpaceAfterTwips != 0)
+        w.WriteStartElement("w", "drawing", WNs);
+        if (inline)
         {
-            w.WriteStartElement("w", "pPr", WNs);
-            if (picture.SpaceBeforeTwips != 0 || picture.SpaceAfterTwips != 0)
-            {
-                w.WriteStartElement("w", "spacing", WNs);
-                if (picture.SpaceBeforeTwips != 0) w.WriteAttributeString("w", "before", WNs, picture.SpaceBeforeTwips.ToString());
-                if (picture.SpaceAfterTwips != 0) w.WriteAttributeString("w", "after", WNs, picture.SpaceAfterTwips.ToString());
-                w.WriteEndElement();
-            }
-            if (picture.Alignment != DocxAlignment.Left)
-            {
-                w.WriteStartElement("w", "jc", WNs);
-                w.WriteAttributeString("w", "val", WNs, picture.Alignment == DocxAlignment.Right ? "right" : "center");
-                w.WriteEndElement();
-            }
+            w.WriteStartElement("wp", "inline", WpNs);
+            foreach (string edge in (string[])["distT", "distB", "distL", "distR"]) w.WriteAttributeString(edge, "0");
+        }
+        else
+        {
+            // The order of the children is fixed by the schema, and Word refuses a document that breaks it.
+            bool square = picture.Wrap == DocxWrap.Square;
+            w.WriteStartElement("wp", "anchor", WpNs);
+            w.WriteAttributeString("distT", "0");
+            w.WriteAttributeString("distB", "0");
+            w.WriteAttributeString("distL", square ? "114300" : "0");
+            w.WriteAttributeString("distR", square ? "114300" : "0");
+            w.WriteAttributeString("simplePos", "0");
+            w.WriteAttributeString("relativeHeight", (251658240 + id).ToString());
+            w.WriteAttributeString("behindDoc", picture.Wrap == DocxWrap.BehindText ? "1" : "0");
+            w.WriteAttributeString("locked", "0");
+            w.WriteAttributeString("layoutInCell", "1");
+            w.WriteAttributeString("allowOverlap", "1");
+
+            w.WriteStartElement("wp", "simplePos", WpNs);
+            w.WriteAttributeString("x", "0");
+            w.WriteAttributeString("y", "0");
+            w.WriteEndElement();
+
+            w.WriteStartElement("wp", "positionH", WpNs);
+            w.WriteAttributeString("relativeFrom", "page");
+            w.WriteElementString("wp", "posOffset", WpNs, ((long)Math.Round(picture.OffsetXPoints * EmuPerPoint)).ToString());
+            w.WriteEndElement();
+
+            w.WriteStartElement("wp", "positionV", WpNs);
+            w.WriteAttributeString("relativeFrom", picture.VerticalFromPage ? "page" : "paragraph");
+            w.WriteElementString("wp", "posOffset", WpNs, ((long)Math.Round(picture.OffsetYPoints * EmuPerPoint)).ToString());
             w.WriteEndElement();
         }
-
-        w.WriteStartElement("w", "r", WNs);
-        w.WriteStartElement("w", "drawing", WNs);
-        w.WriteStartElement("wp", "inline", WpNs);
-        foreach (string edge in (string[])["distT", "distB", "distL", "distR"]) w.WriteAttributeString(edge, "0");
 
         w.WriteStartElement("wp", "extent", WpNs);
         w.WriteAttributeString("cx", cx.ToString());
@@ -1088,6 +1317,20 @@ public static class DocxWriter
         w.WriteStartElement("wp", "effectExtent", WpNs);
         foreach (string edge in (string[])["l", "t", "r", "b"]) w.WriteAttributeString(edge, "0");
         w.WriteEndElement();
+
+        if (!inline)
+        {
+            if (picture.Wrap == DocxWrap.Square)
+            {
+                w.WriteStartElement("wp", "wrapSquare", WpNs);
+                w.WriteAttributeString("wrapText", "bothSides");
+                w.WriteEndElement();
+            }
+            else
+            {
+                w.WriteElementString("wp", "wrapNone", WpNs, null);
+            }
+        }
 
         w.WriteStartElement("wp", "docPr", WpNs);
         w.WriteAttributeString("id", id.ToString());
@@ -1140,13 +1383,11 @@ public static class DocxWriter
         w.WriteEndElement();
         w.WriteEndElement();
 
-        w.WriteEndElement();
-        w.WriteEndElement();
-        w.WriteEndElement();
-        w.WriteEndElement();
-        w.WriteEndElement();
-        w.WriteEndElement();
-        w.WriteEndElement();
+        w.WriteEndElement(); // pic:pic
+        w.WriteEndElement(); // a:graphicData
+        w.WriteEndElement(); // a:graphic
+        w.WriteEndElement(); // wp:inline or wp:anchor
+        w.WriteEndElement(); // w:drawing
     }
 
     private static void WriteTable(XmlWriter w, DocxTable table, PackageParts parts)
@@ -1161,9 +1402,29 @@ public static class DocxWriter
         w.WriteAttributeString("w", "w", WNs, table.ColumnWidthsTwips.Sum().ToString());
         w.WriteAttributeString("w", "type", WNs, "dxa");
         w.WriteEndElement();
-        if (table.HasBorders) WriteTableBorders(w);
+        if (table.IndentTwips != 0)
+        {
+            w.WriteStartElement("w", "tblInd", WNs);
+            w.WriteAttributeString("w", "w", WNs, table.IndentTwips.ToString());
+            w.WriteAttributeString("w", "type", WNs, "dxa");
+            w.WriteEndElement();
+        }
+        if (table.HasBorders) WriteTableBorders(w, table.BorderEighths, table.BorderColor);
+        else WriteNoTableBorders(w);
         w.WriteStartElement("w", "tblLayout", WNs);
         w.WriteAttributeString("w", "type", WNs, "fixed");
+        w.WriteEndElement();
+
+        // Without a cell margin the text touches the rules; with Word's default it sits where Word puts it
+        // rather than where the PDF did. The padding is measured from the page.
+        w.WriteStartElement("w", "tblCellMar", WNs);
+        foreach (var (edge, value) in (ReadOnlySpan<(string, int)>)[("top", table.CellTopPaddingTwips), ("left", table.CellPaddingTwips), ("bottom", 0), ("right", table.CellPaddingTwips)])
+        {
+            w.WriteStartElement("w", edge, WNs);
+            w.WriteAttributeString("w", "w", WNs, Math.Max(0, value).ToString());
+            w.WriteAttributeString("w", "type", WNs, "dxa");
+            w.WriteEndElement();
+        }
         w.WriteEndElement();
         w.WriteEndElement();
 
@@ -1179,10 +1440,17 @@ public static class DocxWriter
         foreach (var row in table.Rows)
         {
             w.WriteStartElement("w", "tr", WNs);
-            if (row.IsHeader)
+            if (row.IsHeader || row.MinHeightTwips > 0)
             {
                 w.WriteStartElement("w", "trPr", WNs);
-                w.WriteElementString("w", "tblHeader", WNs, null);
+                if (row.MinHeightTwips > 0)
+                {
+                    w.WriteStartElement("w", "trHeight", WNs);
+                    w.WriteAttributeString("w", "val", WNs, row.MinHeightTwips.ToString());
+                    w.WriteAttributeString("w", "hRule", WNs, "atLeast");
+                    w.WriteEndElement();
+                }
+                if (row.IsHeader) w.WriteElementString("w", "tblHeader", WNs, null);
                 w.WriteEndElement();
             }
 
@@ -1224,21 +1492,104 @@ public static class DocxWriter
                 w.WriteEndElement();
 
                 // A cell must hold at least one block-level element, and it must end with a paragraph.
-                bool wroteParagraph = false;
-                foreach (var block in cell.Blocks)
-                {
-                    WriteBlock(w, block, parts);
-                    wroteParagraph = block is DocxParagraph or DocxPicture;
-                }
-                if (!wroteParagraph) w.WriteElementString("w", "p", WNs, null);
+                WriteBlocks(w, cell.Blocks, parts);
+                if (cell.Blocks.Count == 0 || cell.Blocks[^1] is DocxTable) WriteSpacerParagraph(w);
                 w.WriteEndElement();
             }
             w.WriteEndElement();
         }
         w.WriteEndElement();
+    }
 
-        // Word will not accept a table as the last element of a body or cell without a paragraph after it.
-        w.WriteElementString("w", "p", WNs, null);
+    /// <summary>
+    /// Writes a run of blocks. Two tables in a row need a paragraph between them, or Word merges them into
+    /// one; that paragraph is made as small as Word allows so it does not open a gap the PDF did not have.
+    /// </summary>
+    private static void WriteBlocks(XmlWriter w, IReadOnlyList<DocxBlock> blocks, PackageParts parts)
+    {
+        for (int i = 0; i < blocks.Count; i++)
+        {
+            WriteBlock(w, blocks[i], parts);
+            if (blocks[i] is DocxTable && i + 1 < blocks.Count && blocks[i + 1] is DocxTable) WriteSpacerParagraph(w);
+        }
+    }
+
+    /// <summary>A one-point empty paragraph: where Word demands a paragraph the layout has no room for.</summary>
+    private static void WriteSpacerParagraph(XmlWriter w, DocxSection? section = null, PackageParts? parts = null)
+    {
+        w.WriteStartElement("w", "p", WNs);
+        w.WriteStartElement("w", "pPr", WNs);
+        w.WriteStartElement("w", "spacing", WNs);
+        w.WriteAttributeString("w", "before", WNs, "0");
+        w.WriteAttributeString("w", "after", WNs, "0");
+        w.WriteAttributeString("w", "line", WNs, "20");
+        w.WriteAttributeString("w", "lineRule", WNs, "exact");
+        w.WriteEndElement();
+        w.WriteStartElement("w", "rPr", WNs);
+        w.WriteStartElement("w", "sz", WNs);
+        w.WriteAttributeString("w", "val", WNs, "2");
+        w.WriteEndElement();
+        w.WriteEndElement();
+        if (section is not null && parts is not null) WriteSectionProperties(w, section, parts);
+        w.WriteEndElement();
+        w.WriteEndElement();
+    }
+
+    /// <summary>Rules over and under a paragraph. Schema order puts <c>w:pBdr</c> before tabs and spacing.</summary>
+    private static void WriteParagraphBorders(XmlWriter w, DocxBorder? above, DocxBorder? below)
+    {
+        if (above is null && below is null) return;
+        w.WriteStartElement("w", "pBdr", WNs);
+        Edge("top", above);
+        Edge("bottom", below);
+        // Word draws one border round a run of paragraphs that share it, and the bottom rule under the last
+        // one only. A rule under every entry of a list is the border between them — and Word sets its space
+        // both above and below the line, measured, so it gets half: the rule takes the same room either way.
+        Edge("between", below is null ? null : below with { SpacePoints = Math.Round(below.SpacePoints) / 2 });
+        w.WriteEndElement();
+
+        void Edge(string name, DocxBorder? border)
+        {
+            if (border is null) return;
+            w.WriteStartElement("w", name, WNs);
+            w.WriteAttributeString("w", "val", WNs, "single");
+            w.WriteAttributeString("w", "sz", WNs, Math.Clamp(border.Eighths, 2, 96).ToString());
+            // Word takes the distance from the text in whole points, and no more than 31 of them.
+            w.WriteAttributeString("w", "space", WNs, ((int)Math.Floor(Math.Clamp(border.SpacePoints, 0, 31))).ToString());
+            w.WriteAttributeString("w", "color", WNs, Hex(border.Color));
+            w.WriteEndElement();
+        }
+    }
+
+    private static void WriteTabs(XmlWriter w, IReadOnlyList<DocxTabStop> stops)
+    {
+        if (stops.Count == 0) return;
+        w.WriteStartElement("w", "tabs", WNs);
+        foreach (var stop in stops)
+        {
+            w.WriteStartElement("w", "tab", WNs);
+            w.WriteAttributeString("w", "val", WNs, stop.Alignment switch
+            {
+                DocxAlignment.Center => "center",
+                DocxAlignment.Right => "right",
+                _ => "left",
+            });
+            w.WriteAttributeString("w", "pos", WNs, Math.Max(0, stop.PositionTwips).ToString());
+            w.WriteEndElement();
+        }
+        w.WriteEndElement();
+    }
+
+    private static void WriteNoTableBorders(XmlWriter w)
+    {
+        w.WriteStartElement("w", "tblBorders", WNs);
+        foreach (string edge in (string[])["top", "left", "bottom", "right", "insideH", "insideV"])
+        {
+            w.WriteStartElement("w", edge, WNs);
+            w.WriteAttributeString("w", "val", WNs, "nil");
+            w.WriteEndElement();
+        }
+        w.WriteEndElement();
     }
 
     private static void WriteHeaderFooter(XmlWriter w, DocxHeaderFooter content, bool isHeader)
@@ -1246,9 +1597,18 @@ public static class DocxWriter
         w.WriteStartElement("w", isHeader ? "hdr" : "ftr", WNs);
         w.WriteAttributeString("xmlns", "r", null, RNs);
         w.WriteStartElement("w", "p", WNs);
+        w.WriteStartElement("w", "pPr", WNs);
+        WriteParagraphBorders(w, content.BorderAbove, content.BorderBelow);
+        WriteTabs(w, content.TabStops);
+        // The document's default gap after a paragraph would sit under the running head and push the body.
+        w.WriteStartElement("w", "spacing", WNs);
+        w.WriteAttributeString("w", "before", WNs, "0");
+        w.WriteAttributeString("w", "after", WNs, "0");
+        w.WriteAttributeString("w", "line", WNs, "240");
+        w.WriteAttributeString("w", "lineRule", WNs, "auto");
+        w.WriteEndElement();
         if (content.Alignment != DocxAlignment.Left)
         {
-            w.WriteStartElement("w", "pPr", WNs);
             w.WriteStartElement("w", "jc", WNs);
             w.WriteAttributeString("w", "val", WNs, content.Alignment switch
             {
@@ -1257,8 +1617,8 @@ public static class DocxWriter
                 _ => "left",
             });
             w.WriteEndElement();
-            w.WriteEndElement();
         }
+        w.WriteEndElement();
 
         for (int i = 0; i < content.Runs.Count; i++)
         {

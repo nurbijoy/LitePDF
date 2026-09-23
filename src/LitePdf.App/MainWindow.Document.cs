@@ -8,6 +8,7 @@ using LitePdf.App.ViewModels;
 using LitePdf.App.Viewer;
 using LitePdf.App.Views;
 using LitePdf.Core;
+using LitePdf.Core.Export;
 using LitePdf.Core.Storage;
 using LitePdf.Pdfium;
 using Microsoft.Win32;
@@ -573,8 +574,36 @@ public partial class MainWindow
         _vm.IsTaskRunning = true;
         try
         {
-            await DocxExport.ExportAsync(session, save.FileName, settings, progress, cts.Token);
-            ShowToast(settings.Pages.Count == 1 ? "Converted 1 page to Word" : $"Converted {settings.Pages.Count} pages to Word");
+            int converted;
+            while (true)
+            {
+                try
+                {
+                    converted = await DocxExport.ExportAsync(session, save.FileName, settings, progress, cts.Token);
+                    break;
+                }
+                catch (UnsupportedPagesException ex) when (!settings.SkipUnsupportedPages)
+                {
+                    // A text document with a picture for a cover, or a scanned page bound in: say which pages
+                    // they are and offer the rest, rather than send the reader off to work out a page range.
+                    _vm.IsTaskRunning = false;
+                    int rest = ex.SelectedCount - ex.Pages.Count;
+                    string which = ex.Pages.Count == 1
+                        ? $"Page {TextPdfExport.DescribePages(ex.Pages)} has"
+                        : $"Pages {TextPdfExport.DescribePages(ex.Pages)} have";
+                    var answer = MessageDialog.Show(this, "Some pages have no text",
+                        $"{which} no text to convert: scanned pages and pictures can't be turned into Word text.\n\n" +
+                        $"Convert the other {rest} {(rest == 1 ? "page" : "pages")} and leave {(ex.Pages.Count == 1 ? "it" : "them")} out?",
+                        MessageDialogButtons.OkCancel, okText: rest == 1 ? "Convert 1 page" : $"Convert {rest} pages");
+                    if (answer != MessageDialogResult.Ok) return;
+
+                    settings = settings with { SkipUnsupportedPages = true };
+                    _vm.TaskProgress = 0;
+                    _vm.TaskProgressText = "Reading the document";
+                    _vm.IsTaskRunning = true;
+                }
+            }
+            ShowToast(converted == 1 ? "Converted 1 page to Word" : $"Converted {converted} pages to Word");
             RevealInExplorer(save.FileName);
         }
         catch (OperationCanceledException)

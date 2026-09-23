@@ -162,9 +162,9 @@ public sealed class RecognizedPageTests
     {
         // A full-page scan kept as a picture, on a page whose margins leave 770 pt of height.
         var page = new PageBuilder { Size = new PageSize(595, 842) }
-            .Line("A caption under the plate.", 0.1, 0.96, 0.5)
+            .Line("A caption under the plate.", 0.1, 0.955, 0.5)
             .Build() with
-        { Images = [Picture(new RectD(0.02, 0.02, 0.98, 0.99))] };
+        { Images = [Picture(new RectD(0.02, 0.02, 0.98, 0.94))] };
 
         var document = ContentComposer.Compose([page]);
         var section = document.Sections[0];
@@ -178,6 +178,6 @@ public sealed class RecognizedPageTests
         Assert.True(picture.WidthPoints <= width);
 
         // And it keeps its shape while it shrinks.
-        Assert.Equal(0.96 * 595 / (0.97 * 842), picture.WidthPoints / picture.HeightPoints, 2);
+        Assert.Equal(0.96 * 595 / (0.92 * 842), picture.WidthPoints / picture.HeightPoints, 2);
     }
 }
