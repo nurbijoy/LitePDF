@@ -179,6 +179,7 @@ internal sealed class PageBuilder
     private readonly List<MarkedRange> _marks = [];
     private readonly List<PageTag> _tags = [];
     private int _mark = -1;
+    private double _lastTop, _lastHeight = 0.0167;
 
     public PageSize Size { get; init; } = new(612, 792);
 
@@ -189,6 +190,14 @@ internal sealed class PageBuilder
     {
         StartLine();
         Append(text, left, top, right, height, style);
+        return this;
+    }
+
+    /// <summary>Continues the last line with more text in another style: a word in another face, a link.</summary>
+    public PageBuilder Then(string text, double left, double right, TextStyle? style = null)
+    {
+        AppendUnplaced(' ');
+        Append(text, left, _lastTop, right, _lastHeight, style);
         return this;
     }
 
@@ -222,6 +231,7 @@ internal sealed class PageBuilder
 
     private void Append(string text, double left, double top, double right, double height, TextStyle? style)
     {
+        (_lastTop, _lastHeight) = (top, height);
         int start = _text.Length;
         double step = text.Length > 0 ? (right - left) / text.Length : 0;
         for (int i = 0; i < text.Length; i++)

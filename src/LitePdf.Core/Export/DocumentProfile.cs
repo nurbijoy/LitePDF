@@ -16,12 +16,16 @@ internal sealed class DocumentProfile
     private readonly HashSet<string> _runningHeads;
     private readonly double[] _headingSizes;
     private readonly Dictionary<double, double> _pitchBySize;
+    private readonly double[] _textLeft;
+    private readonly double[] _textRight;
 
     private DocumentProfile(
         double bodySize, string bodyFont, double glyphHeight, double linePitchPoints, DocxMargins margins,
         double[] headingSizes, RunningHeads running, Dictionary<double, double> pitchBySize,
-        ILookup<int, (double Y, int Depth, string Title)> outline)
+        ILookup<int, (double Y, int Depth, string Title)> outline, double[] textLeft, double[] textRight)
     {
+        _textLeft = textLeft;
+        _textRight = textRight;
         BodySize = bodySize;
         BodyFont = bodyFont;
         GlyphHeight = glyphHeight;
@@ -52,6 +56,20 @@ internal sealed class DocumentProfile
     public double LinePitchPoints { get; }
 
     public DocxMargins Margins { get; }
+
+    /// <summary>
+    /// Where the text area starts on a page, in points from its left edge: the margin, except in a book set
+    /// with mirrored margins, where left and right pages start their text at different places. Indents are
+    /// measured from here, so a page's text starts at the margin in Word whichever side it was printed on.
+    /// </summary>
+    public double TextLeft(int pageIndex) => _textLeft[pageIndex & 1];
+
+    /// <summary>
+    /// Where the text on a page ends, in points from its left edge: the right edge the fuller pages reach.
+    /// Not Word's right margin, which is set roomier on purpose; this is the measure the lines were set to,
+    /// and a line is short only against that.
+    /// </summary>
+    public double TextRight(int pageIndex) => _textRight[pageIndex & 1];
 
     public DocxHeaderFooter? Header { get; }
 
@@ -122,7 +140,9 @@ internal sealed class DocumentProfile
         var lineHeights = new List<double>();
         var pitches = new List<double>();
         var lefts = new List<double>();
+        var leftsByParity = new[] { new List<double>(), new List<double>() };
         var rights = new List<double>();
+        var rightsByParity = new[] { new List<double>(), new List<double>() };
         var tops = new List<double>();
         var bottoms = new List<double>();
 
@@ -141,7 +161,7 @@ internal sealed class DocumentProfile
             var sizes = new List<double>();
             foreach (var line in page.Text.Lines)
             {
-                if (line.Bounds.IsEmpty || line.End <= line.Start) continue;
+                if (line.Bounds.IsEmpty || line.End <= line.Start || ContentComposer.IsOffPage(line.Bounds)) continue;
                 string raw = page.Text.Text[line.Start..line.End];
                 if (raw.Trim().Length == 0) continue;
                 if (runningHeads.Count > 0 && InBand(line.Bounds) &&
@@ -173,6 +193,8 @@ internal sealed class DocumentProfile
             if (body.Count > 0)
             {
                 lefts.Add(body.Min(b => b.Left));
+                leftsByParity[page.PageIndex & 1].Add(body.Min(b => b.Left) * page.Size.Width);
+                rightsByParity[page.PageIndex & 1].Add(body.Max(b => b.Right) * page.Size.Width);
                 rights.Add(body.Max(b => b.Right));
                 tops.Add(body.Min(b => b.Top));
                 bottoms.Add(body.Max(b => b.Bottom));
@@ -235,8 +257,23 @@ internal sealed class DocumentProfile
             FirstFooter = WithTabs(running.FirstFooter, running.FooterTabs, reference, margins),
         };
 
+        // Mirrored margins show as two left edges, one for each side of the spread. Anything less than a
+        // few points apart is the same margin measured twice.
+        double[] textLeft = [margins.Left, margins.Left];
+        double right = rights.Count > 0 ? Percentile(rights, 0.85) * reference.Width : reference.Width - margins.Right;
+        double[] textRight = [right, right];
+        if (leftsByParity.All(l => l.Count >= 2))
+        {
+            double even = ContentComposer.Median(leftsByParity[0]), odd = ContentComposer.Median(leftsByParity[1]);
+            if (Math.Abs(even - odd) > 4)
+            {
+                textLeft = [even, odd];
+                textRight = [Percentile(rightsByParity[0], 0.85), Percentile(rightsByParity[1], 0.85)];
+            }
+        }
+
         return new DocumentProfile(bodySize, bodyFont, glyph, pitchPoints, margins, headingSizes,
-            running, pitchBySize, flattened);
+            running, pitchBySize, flattened, textLeft, textRight);
     }
 
     private static DocxHeaderFooter? WithTabs(
@@ -305,6 +342,12 @@ internal sealed class DocumentProfile
         /// <summary>The parts of the first sample, when the line is set in pieces across the page.</summary>
         public List<RectD> Pieces { get; set; } = [];
         public TextStyle Style { get; set; } = TextStyle.Default;
+
+        /// <summary>
+        /// The look of each part of the first sample, one per part: a head is often a grey title at one
+        /// side and a red "CONFIDENTIAL" at the other, and one style for the line would lose the red.
+        /// </summary>
+        public List<TextStyle> PieceStyles { get; set; } = [];
     }
 
     /// <summary>What the running-head pass settled.</summary>
@@ -350,7 +393,7 @@ internal sealed class DocumentProfile
             var area = TextArea(page);
             foreach (var line in page.Text.Lines)
             {
-                if (line.Bounds.IsEmpty || line.End <= line.Start) continue;
+                if (line.Bounds.IsEmpty || line.End <= line.Start || ContentComposer.IsOffPage(line.Bounds)) continue;
                 string raw = page.Text.Text[line.Start..line.End].Trim();
                 if (raw.Length is 0 or > 120) continue;
 
@@ -374,6 +417,7 @@ internal sealed class DocumentProfile
                     {
                         Style = page.StyleAt(line.Start),
                         Pieces = pieces.Count > 1 ? [.. pieces.Select(p => p.Bounds)] : [],
+                        PieceStyles = [.. pieces.Select(p => page.StyleAt(p.Start))],
                     };
                 }
                 string text = pieces.Count > 1 ? string.Join("\t", pieces.Select(p => p.Text)) : raw;
@@ -464,9 +508,9 @@ internal sealed class DocumentProfile
     /// A line cut where a gap is far wider than a word space: the parts of a running head spread across the
     /// page. PDFium joins them into one line with a single space, which hides that they were ever apart.
     /// </summary>
-    private static List<(string Text, RectD Bounds)> Pieces(PageContent page, TextLine line)
+    private static List<(string Text, RectD Bounds, int Start)> Pieces(PageContent page, TextLine line)
     {
-        var pieces = new List<(string, RectD)>();
+        var pieces = new List<(string, RectD, int)>();
         double gap = Math.Max(0.02, line.Bounds.Height * 3);
         int start = -1;
         var bounds = RectD.Empty;
@@ -476,7 +520,7 @@ internal sealed class DocumentProfile
         {
             if (start < 0) return;
             string text = page.Text.Text[start..end].Trim();
-            if (text.Length > 0 && !bounds.IsEmpty) pieces.Add((text, bounds));
+            if (text.Length > 0 && !bounds.IsEmpty) pieces.Add((text, bounds, start));
             start = -1;
             bounds = RectD.Empty;
         }
@@ -544,10 +588,30 @@ internal sealed class DocumentProfile
     private static (DocxHeaderFooter? Content, int Value) BuildRunning(Candidate candidate)
     {
         string sample = candidate.Samples[0].Text;
-        var style = candidate.Style;
         var matches = DigitRun.Matches(sample);
 
-        DocxHeaderFooter Literal() => new([new DocxRun(sample, style)], DocxAlignment.Center);
+        // Each part of the head in its own look; the parts are separated by tabs.
+        var styles = new TextStyle[sample.Length];
+        for (int c = 0, piece = 0; c < sample.Length; c++)
+        {
+            if (sample[c] == '\t') piece++;
+            styles[c] = piece < candidate.PieceStyles.Count ? candidate.PieceStyles[piece] : candidate.Style;
+        }
+
+        List<DocxRun> Runs(int from, int to)
+        {
+            var runs = new List<DocxRun>();
+            for (int c = from; c < to;)
+            {
+                int end = c + 1;
+                while (end < to && styles[end] == styles[c]) end++;
+                runs.Add(new DocxRun(sample[c..end], styles[c]));
+                c = end;
+            }
+            return runs;
+        }
+
+        DocxHeaderFooter Literal() => new(Runs(0, sample.Length), DocxAlignment.Center);
         if (matches.Count == 0) return (Literal(), 0);
 
         int index = -1;
@@ -592,10 +656,10 @@ internal sealed class DocumentProfile
             if (text[..number.Index] != before || text[(number.Index + number.Length)..] != after)
                 return (null, 0);
         }
-        if (before.Length > 0) runs2.Add(new DocxRun(before, style));
+        runs2.AddRange(Runs(0, match.Index));
         int numberRun = runs2.Count;
-        runs2.Add(new DocxRun(match.Value, style));
-        if (after.Length > 0) runs2.Add(new DocxRun(after, style));
+        runs2.Add(new DocxRun(match.Value, styles[match.Index]));
+        runs2.AddRange(Runs(match.Index + match.Length, sample.Length));
 
         return (new DocxHeaderFooter(runs2, DocxAlignment.Center) { PageNumberRun = numberRun },
                 int.Parse(match.Value, System.Globalization.CultureInfo.InvariantCulture));
@@ -605,7 +669,7 @@ internal sealed class DocumentProfile
     {
         var bounds = RectD.Empty;
         foreach (var line in page.Text.Lines)
-            if (!line.Bounds.IsEmpty) bounds = bounds.Union(line.Bounds);
+            if (!line.Bounds.IsEmpty && !ContentComposer.IsOffPage(line.Bounds)) bounds = bounds.Union(line.Bounds);
         return bounds;
     }
 

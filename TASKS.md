@@ -1,12 +1,64 @@
 # TASKS
 
+## Word conversion: structure that survives into Word (2026-09-24)
+Reported after converting `claude.pdf` and the ECL Model Development Document: "indentation, structure
+falls". Reproduced by converting both through the app's own UI and opening the result in Word; every item
+below was a defect visible there.
+- **List items were taken for centred text.** An item inset by about as much as its last word left empty at
+  the right looked centred, so it was split at the break, centred, and the fragment got its own bullet —
+  the bullet jitter and stray bullets. Centring now needs the lines to be clear of both edges and balanced
+  within a letter's width, with lines that share a left edge counting as set from the left; list items and
+  contents entries are never centred. A list item's next line is judged against the column like prose.
+- **Contents pages are tab leaders.** "1.1 Purpose ........ 5" becomes the text, a tab, and the number,
+  with a right-aligned stop and a dot (or middle-dot) leader at the number's edge — one paragraph per entry,
+  never a numbered list, never a heading. A leader has to lead to a page reference (a number or a roman
+  numeral); underscores and hyphens only to a bare number, so a fill-in blank in a sentence stays text.
+- **Shaded panels are Word boxes.** A filled rectangle holding whole lines of text (a note, a callout, a code
+  listing) becomes paragraph shading with a border on each side: the colour and weight the page drew on that
+  side, or the fill colour where it drew none, so the padding stays shaded. Border distances are the padding
+  measured, and their room comes out of the spacing around the panel. The rules and rasterized corner
+  pieces a panel is drawn from are no longer placed as stray pictures or paragraph rules.
+- **Code keeps its lines and indentation.** A line set (nearly) entirely in a monospaced face is code: line
+  breaks kept, blank lines kept, and every character put back in its column, since PDFs draw indentation as a
+  jump rather than as spaces. A listing broken by a page is joined back into one. A sentence with a
+  monospaced link in it is not code.
+- **Tables across pages are one table.** A table that runs on at the top of the next page with the same
+  columns is joined to the one before; the header row printed again is dropped and the first one marked to
+  repeat. Cells whose text the page centred vertically are centred in Word. Drawings that duplicate a
+  table's shading or a panel's edges are dropped (one floated a header row over a heading).
+- **Paragraph grouping.** The median line gap ignores lines side by side (table cells dragged it to zero
+  and split paragraphs at every line); a run of narrow lines in one column band is not a column layout; table
+  lines are left out of column detection; a paragraph never mixes lines inside and outside a table or panel
+  (a table took the whole paragraph and lost the rest); indents and centring are measured against the
+  page's text area (with mirrored margins read per side), not wherever its lines happen to reach; a line
+  wrapped because of one long word in a narrow cell no longer ends its paragraph; text wholly outside the
+  page (a printer's slug) is ignored.
+- **Running heads and page breaks.** Each part of a running head keeps its own style (a red "CONFIDENTIAL");
+  the PAGE field carries the footer's formatting on every run, so Word no longer prints the number at body
+  size; a Heading 1 at the top of a page starts a new page when the page before had two lines to spare.
+- Earlier the same week (8077a50, not recorded then): text reflows instead of keeping source line breaks;
+  page breaks are kept only where the page ended early, started low or opened a chapter; line spacing is a
+  multiple of each installed font's own line height; columns become Word section columns; tab-aligned lines,
+  paragraph rules and running-head rules, letter-spaced headings and floating pictures carry over; a
+  selection with scanned pages offers to convert the rest.
+
+Verified: `dotnet build` 0 warnings; 247 tests (12 new in `DocumentStructureTests`); `--self-test` passed.
+Live: both reported PDFs converted through More → Convert to Word… → Save (UI Automation), opened in Word
+and inspected page by page with formatting marks on — contents, nested lists, panels, the SQL and Python
+listings, the joined tables, running heads. The committed build was converted the same way for comparison
+and showed every reported defect. Ground-truth paragraphs 298/298; a 13-document corpus keeps its page
+counts and every word (the only words not carried are a printer's slug below the trim, by design).
+Known limits: a two-column page PDFium reads as merged lines (GMAT) still comes out interleaved; boxed
+paragraphs with different left indents (a list inside a panel) are drawn by Word as stacked boxes.
+
 ## Word conversion quality and text-only scope (2026-09-22)
 - Removed OCR and whole-page raster fallback from the app's Word export. Image documents cannot use the
   command; image-only PDF pages and invisible OCR layers are rejected before output is created/replaced.
   Mixed documents can be exported by selecting their text pages. Short visible text remains valid.
-- Keep source line endings and page boundaries in the app's editable Word output. Explicit paragraph
-  spacing avoids inherited gaps; hard line breaks are not justified. Mixed paper sizes no longer add an
-  unnecessary blank paragraph at the section boundary.
+- Keep source line endings and page boundaries in the app's editable Word output (superseded on 09-23:
+  the app now reflows and keeps only deliberate page breaks). Explicit paragraph spacing avoids inherited
+  gaps; hard line breaks are not justified. Mixed paper sizes no longer add an unnecessary blank paragraph
+  at the section boundary.
 - Fix same-baseline two-column prose, literal `[Figure]` text loss, compound-word hyphens, and paragraph
   joins across skipped pages. Preserve list labels, punctuation, starting numbers and restarts; consecutive
   compatible numbered items share a Word numbering instance.
@@ -236,9 +288,9 @@ Core, PDFium wrapper, OCR and the WPF app were rewritten. The previous implement
 | OCR one A4 scan at 400 DPI with layout analysis | ≈ 1.2 s | — |
 
 ## Next work (priority order)
-1. **T-V1** Open a converted .docx in Word and in LibreOffice on a machine that has them, including one with
-   comments and one with embedded fonts; add an encrypted sample to SampleGen (needs an RC4/AES writer or a
-   checked-in small file).
+1. **T-V1** Word is now checked on every conversion change (see 2026-09-24). Still to do: LibreOffice, a
+   document with comments and one with embedded fonts; add an encrypted sample to SampleGen (needs an
+   RC4/AES writer or a checked-in small file).
 2. **T-P1** Measure startup with the ReadyToRun publish; profile startup (PDFium init, WPF theme load, DocumentKey hashing).
 3. **T-P2** Pool render buffers (`ArrayPool`) to reduce LOH churn; consider rendering bitmaps straight into `WriteableBitmap`.
 4. **T-F2** Save as searchable PDF: embed OCR text as invisible text (`FPDFText_SetText`, render mode 3).

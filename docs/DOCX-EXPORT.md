@@ -158,7 +158,11 @@ images, rules and vector regions.
 5. **Hyphens.** A line-final `-` followed by a lower-case continuation is removed and the words joined. A
    line-final `-` before a capital or a digit, or on a line that already ends short, is a real hyphen and kept.
 6. **Alignment and indent.** Left/right/centre from the line edges against the column; justified when both
-   edges are flush on every line but the last. Indent in twips from the column's left edge.
+   edges are flush on every line but the last. The column of a single-measure page is its text area — the
+   document's left margin (per side when the margins are mirrored) to the right edge the fuller pages reach —
+   widened only where a line reaches past it. Centred means clear of both edges and balanced within a
+   letter's width; lines sharing a left edge are set from the left, and a list item never counts as centred.
+   Indent in twips from the column's left edge.
 7. **Headings.** From tags when tagged. Otherwise: size above body size, or bold and short and spaced, ranked
    into Heading 1–3 by size cluster. **The outline is the tie-breaker** — `GetOutlineAsync` already returns
    bookmarks with a page and a Y, so a line at that Y is a heading at that bookmark's depth. That is exact
@@ -168,7 +172,16 @@ images, rules and vector regions.
 9. **Headers and footers.** Lines in the top or bottom margin band whose text repeats across three or more
    pages — or repeats with only a changing number — become a real Word header/footer with a `PAGE` field. Left
    in the body they interrupt the text at every page break, which is the most-complained-about defect of every
-   converter on the market.
+   converter on the market. Each part of a head set in pieces keeps its own style, and every run of the PAGE
+   field carries the number's formatting, since Word formats a refreshed field like its first run.
+9a. **Contents entries.** Four or more dots (or middle dots) running from an entry's text to a page reference
+   at the end of the line become a tab to a right-aligned stop with that leader. Underscores and hyphens count
+   only before a bare number; anything else is a blank to fill in.
+9b. **Panels.** Touching filled rectangles of one colour that hold whole lines of text, are not a table's and
+   are not the page's background become a box: shading plus a border on every side, in the colour the page
+   drew along that side or in the fill colour where it drew none. Border distances are the measured padding.
+9c. **Code.** Lines set almost entirely in a monospaced face keep their breaks, their blank lines and their
+   columns: each character goes back to the column its position gives, because indentation is drawn as a jump.
 10. **Page setup.** Size, orientation and margins (the content bounding box across the section's pages) into
     `w:sectPr`. A new section starts where size or orientation changes.
 11. **Links and annotations.** `GetLinksAsync` already gives rects and URIs → `w:hyperlink`. Highlights become
@@ -183,6 +196,10 @@ images, rules and vector regions.
 - **Tags are trusted for grouping, never for style.** Tagged PDFs routinely mark a run as `/P` while drawing it
   bold at 18 pt. Structure from the tags, appearance from the glyphs.
 - **Body size is global.** Measured per page, every page's largest line becomes a heading.
+- **A paragraph never crosses a table's or a panel's edge.** A table replaces the paragraphs its lines are in.
+- **The one-third-short rule is for unbroken text only.** A line ending a third of the measure short ends
+  its paragraph whatever the next word — but only when the next line is one unbroken run (text set without
+  spaces). In a narrow cell a third of the measure is less than one long word.
 
 ## 6. Tables
 
@@ -203,6 +220,11 @@ mangled `w:tbl`.
    the slots under it occupied. Column widths come from where the cells *start*, not from how wide their text
    happens to be, or a table of short words comes out as a huddle of narrow columns in the middle of the page.
    Borders follow the PDF: a tagged table that drew no lines gets none in Word either.
+
+A table that carries on at the top of the next page with the same columns is joined to the one before; the
+header row printed again is dropped and the first row marked to repeat. A cell whose text sits centred in a
+taller row is centred (`w:vAlign`). Rasterized artwork lying on a table is dropped — the table draws its own
+shading and rules.
 3. **Unruled tables**, and only when the export is asked for them. Three or more consecutive lines, each cut
    into the same number of pieces by gaps several characters wide, whose columns line up on one edge down the
    whole run and never overlap, with no piece long enough to be a sentence. Two columns of prose never pass:
@@ -256,8 +278,11 @@ Beyond the standard definition of done in `AGENTS.md`:
 - **Package validity.** Every part parses; every relationship id resolves; content types cover every extension.
 - **Golden XPath assertions** on `word/document.xml` from `SampleGen` PDFs: run counts, bold and size on known
   words, paragraph counts, heading levels, table shape.
-- **Manual.** Open each output in Word *and* LibreOffice with no repair prompt; edit a paragraph and confirm
-  it reflows; compare against the PDF side by side.
+- **Manual, in Word.** Convert through the app itself (More → Convert to Word… → Save), open the file in
+  Word, and page through it with formatting marks on: a contents entry must be one paragraph with a tab, a
+  list item one paragraph with one bullet, a cell one paragraph, a listing one block with its spaces. A PDF
+  rendering of the .docx hides every one of those defects. Word opens it with no repair prompt; LibreOffice
+  is still to be checked.
 
 `SampleGen` writes the fixtures: `sample-formatted.pdf` (headings, ragged prose, a bulleted and a numbered
 list, a ruled table, a plate at 200 DPI, a running head and foot with a page number), `sample-tagged.pdf` (a

@@ -309,8 +309,28 @@ public static class ContentComposer
         var tags = options.UseTags ? TagIndex.Build(page) : TagIndex.Empty;
         var lines = ReadLines(page, profile, options);
 
+        // Tables and panels first: a paragraph never runs from inside one to outside it. A table takes the
+        // paragraphs its lines are in and rebuilds them as cells, so a line outside it caught in the same
+        // paragraph — a note the file forgot to tag, the sentence just above the first row — would be lost.
+        var ruled = TableBuilder.Find(page.Rules, profile.GlyphHeight).Select(g => g.Bounds).ToList();
+        var grids = ruled.Concat(tags.Tables.Select(t => t.Bounds)).ToList();
+        var claims = tags.Tables.Select(t => t.Rows.SelectMany(r => r.Cells).SelectMany(c => c.Ranges).ToList()).ToList();
+        var panels = FindPanels(page, profile, lines, grids);
+        Dictionary<Line, (Panel? Panel, int Table)>? regions = null;
+        if (panels.Count > 0 || grids.Count > 0)
+        {
+            regions = [];
+            foreach (var line in lines)
+            {
+                int table = ruled.FindIndex(g => g.Contains(line.Bounds.Center));
+                if (table < 0 && claims.FindIndex(c => c.Any(r => r.Start < line.End && r.End > line.Start)) is var claimed and >= 0)
+                    table = ruled.Count + claimed;
+                regions[line] = (PanelOf(line, panels, page), table);
+            }
+        }
+
         var paragraphs = new List<Para>();
-        var zones = SplitIntoZones(lines, profile, page, tags.Tables.Count > 0 || options.UnruledTables);
+        var zones = SplitIntoZones(lines, profile, page, tags.Tables.Count > 0 || options.UnruledTables, grids);
         var columns = zones.SelectMany(z => z.Units).Where(u => u.Lines.Count > 0).ToList();
         var home = new Dictionary<Para, (int Zone, int Unit)>(ReferenceEqualityComparer.Instance);
         for (int z = 0; z < zones.Count; z++)
@@ -318,7 +338,7 @@ public static class ContentComposer
             for (int u = 0; u < zones[z].Units.Count; u++)
             {
                 var (column, columnLines) = zones[z].Units[u];
-                foreach (var para in GroupParagraphs(columnLines, column, page))
+                foreach (var para in GroupParagraphs(columnLines, column, page, regions))
                 {
                     paragraphs.Add(para);
                     home[para] = (z, u);
@@ -380,13 +400,19 @@ public static class ContentComposer
         }
 
         var floating = new List<Floating>();
-        if (options.Images && page.Images.Count > 0) PlacePictures(page, profile, tags, options, flow, floating);
+        if (options.Images && page.Images.Count > 0)
+        {
+            // What Word now draws itself — a panel, a table's shading and rules — is not also a picture.
+            var redrawn = panels.Select(p => p.Bounds).Concat(tables.Select(t => t.Bounds)).ToList();
+            PlacePictures(page, profile, tags, options, flow, floating, redrawn);
+        }
 
         var blocks = new List<DocxBlock>(flow.Count);
         var placed = new List<(Para Para, int Block)>(paragraphs.Count);
         LayOut(flow, blocks, placed, page, extras, profile, options);
 
-        AttachRules(blocks, placed, page, profile, tables.Select(t => t.Bounds).ToList());
+        AttachRules(blocks, placed, page, profile, tables.Select(t => t.Bounds).ToList(), panels);
+        if (panels.Count > 0) AttachPanels(blocks, placed, page, profile, options);
         AttachFloating(blocks, placed, floating, page, profile, options);
         if (options.Annotations) AttachComments(blocks, placed, extras, comments);
 
@@ -673,7 +699,7 @@ public static class ContentComposer
 
         foreach (var visual in text.Lines)
         {
-            if (visual.Bounds.IsEmpty) continue;
+            if (visual.Bounds.IsEmpty || IsOffPage(visual.Bounds)) continue;
             string raw = visual.End > visual.Start ? text.Text[visual.Start..visual.End] : string.Empty;
             if (raw.Trim().Length == 0) continue;
 
@@ -737,23 +763,29 @@ public static class ContentComposer
     }
 
     private static List<Zone> SplitIntoZones(
-        List<Line> lines, DocumentProfile profile, PageContent page, bool hasTables)
+        List<Line> lines, DocumentProfile profile, PageContent page, bool hasTables, List<RectD> grids)
     {
         var zones = new List<Zone>();
-        var units = SplitIntoColumns(lines, profile, page, hasTables, zones);
+        var units = SplitIntoColumns(lines, profile, page, hasTables, grids, zones);
         if (zones.Count == 0 && units.Count > 0)
             zones.Add(new Zone(units, [], Bounds(units.SelectMany(u => u.Lines))));
         return zones;
     }
 
     private static List<(RectD Column, List<Line> Lines)> SplitIntoColumns(
-        List<Line> lines, DocumentProfile profile, PageContent page, bool hasTables, List<Zone> zones)
+        List<Line> lines, DocumentProfile profile, PageContent page, bool hasTables, List<RectD> grids,
+        List<Zone> zones)
     {
         var units = new List<(RectD, List<Line>)>();
         if (lines.Count == 0) return units;
 
         RectD area = Bounds(lines);
-        var bands = DetectColumnBands(lines, area, profile.GlyphHeight);
+        RectD measure = TextMeasure(area, page, profile);
+
+        // The cells of a table stand side by side like columns, but they are the table's: looked for among
+        // them, columns turn up wherever a table does.
+        var text = grids.Count == 0 ? lines : lines.Where(l => !grids.Any(g => g.Contains(l.Bounds.Center))).ToList();
+        var bands = DetectColumnBands(text, area, profile.GlyphHeight);
 
         // PDFium can place both columns in one text line when their baselines match. Try splitting wide
         // whitespace corridors, but accept the split only when repeated prose establishes actual columns.
@@ -770,7 +802,7 @@ public static class ContentComposer
 
         if (bands.Count < 2)
         {
-            units.Add((area, lines));
+            units.Add((measure, lines));
             return units;
         }
 
@@ -785,7 +817,7 @@ public static class ContentComposer
         {
             if (spanning.Count == 0) return;
             var bounds = Bounds(spanning);
-            var rect = new RectD(area.Left, bounds.Top, area.Right, bounds.Bottom);
+            var rect = new RectD(measure.Left, bounds.Top, measure.Right, bounds.Bottom);
             units.Add((rect, [.. spanning]));
             zones.Add(new Zone([(rect, [.. spanning])], [], rect));
             spanning.Clear();
@@ -796,38 +828,77 @@ public static class ContentComposer
             if (zone.Count == 0) return;
             var bounds = Bounds(zone);
             var zoneUnits = new List<(RectD, List<Line>)>();
-            foreach (var band in bands)
+
+            // Each line goes to the band it stands in, or the nearest one: a line centred in the gutter is
+            // still text, and belongs to some column.
+            var home = zone.ToLookup(l => Enumerable.Range(0, bands.Count).MinBy(b =>
+                l.Bounds.Center.X < bands[b].Left ? bands[b].Left - l.Bounds.Center.X
+                : l.Bounds.Center.X > bands[b].Right ? l.Bounds.Center.X - bands[b].Right : 0));
+            for (int b = 0; b < bands.Count; b++)
             {
-                var members = zone.Where(l => l.Bounds.Center.X >= band.Left && l.Bounds.Center.X <= band.Right)
-                                  .OrderBy(l => l.Bounds.Top).ToList();
+                var band = bands[b];
+                var members = home[b].OrderBy(l => l.Bounds.Top).ToList();
                 var rect = members.Count > 0
                     ? new RectD(band.Left, Bounds(members).Top, band.Right, Bounds(members).Bottom)
                     : new RectD(band.Left, bounds.Top, band.Right, bounds.Top);
                 if (members.Count > 0) units.Add((rect, members));
                 if (members.Count > 0 || wordColumns) zoneUnits.Add((rect, members));
             }
-            var zoneRect = new RectD(area.Left, bounds.Top, area.Right, bounds.Bottom);
+            var zoneRect = new RectD(measure.Left, bounds.Top, measure.Right, bounds.Bottom);
             zones.Add(wordColumns ? new Zone(zoneUnits, bands, zoneRect) : new Zone(zoneUnits, [], zoneRect));
             zone.Clear();
         }
 
+        // Runs of lines that span the measure and of lines that do not, in reading order.
+        var runs = new List<(bool Spanning, List<Line> Lines)>();
         foreach (var line in lines)
         {
-            if (area.Width > 0 && line.Bounds.Width >= area.Width * SpanningLineWidth)
+            bool wide = area.Width > 0 && line.Bounds.Width >= area.Width * SpanningLineWidth;
+            if (runs.Count == 0 || runs[^1].Spanning != wide) runs.Add((wide, []));
+            runs[^1].Lines.Add(line);
+        }
+
+        // Narrow lines that only one column holds are not columns: they are the short lines of the text
+        // around them — the end of a paragraph, a heading, the last line of a list item — and belong with it.
+        for (int i = 0; i < runs.Count; i++)
+        {
+            if (runs[i].Spanning) continue;
+            int filled = bands.Count(b => runs[i].Lines.Any(l => l.Bounds.Center.X >= b.Left && l.Bounds.Center.X <= b.Right));
+            if (filled < 2) runs[i] = (true, runs[i].Lines);
+        }
+
+        foreach (var (wide, run) in runs)
+        {
+            if (wide)
             {
                 FlushZone();
-                spanning.Add(line);      // consecutive spanning lines are one headline, not several
+                spanning.AddRange(run);  // consecutive spanning lines are one headline, not several
             }
             else
             {
                 FlushSpanning();
-                zone.Add(line);
+                zone.AddRange(run);
             }
         }
         FlushZone();
         FlushSpanning();
 
         return units;
+    }
+
+    /// <summary>
+    /// The measure a page is set to: its text area, from margin to margin, and wider only where a line
+    /// reaches past it. The lines alone would do on a page of full paragraphs, but on a page of indented
+    /// items or short centred lines they stop short of the margins — and every indent measured from them,
+    /// and every centre, would be off by as much.
+    /// </summary>
+    private static RectD TextMeasure(RectD lines, PageContent page, DocumentProfile profile)
+    {
+        double width = page.Size.Width;
+        double left = profile.TextLeft(page.PageIndex) / width;
+        double right = profile.TextRight(page.PageIndex) / width;
+        if (lines.IsEmpty || right <= left) return lines;
+        return new RectD(Math.Min(lines.Left, left), lines.Top, Math.Max(lines.Right, right), lines.Bottom);
     }
 
     private static IEnumerable<Line> SplitColumnLine(Line line, PageContent page)
@@ -912,6 +983,12 @@ public static class ContentComposer
         /// <summary>Where each of those parts starts across the page, normalized.</summary>
         public IReadOnlyList<double> TabStops { get; init; } = [];
 
+        /// <summary>A run of dots leading to a page number at the end of the line, as a contents page sets it.</summary>
+        public LineLeader? Leader { get; init; }
+
+        /// <summary>Set in a monospaced face, all but a character or two: a line of code.</summary>
+        public bool Monospace { get; init; }
+
         /// <summary>Left edge of the first non-space character, which is what an indent is measured from.</summary>
         public double TextLeft => Bounds.Left;
 
@@ -936,13 +1013,14 @@ public static class ContentComposer
             // The dominant style of a line is the style of most of its characters: a line is rarely mixed,
             // and when it is, the majority is what the paragraph should inherit.
             var counts = new Dictionary<TextStyle, int>();
-            int bold = 0, counted = 0;
+            int bold = 0, counted = 0, fixedPitch = 0;
             for (int i = visual.Start; i < visual.End; i++)
             {
                 if (i >= page.Text.Length || char.IsWhiteSpace(page.Text.Text[i])) continue;
                 var style = page.StyleAt(i);
                 counts[style] = counts.GetValueOrDefault(style) + 1;
                 if (style.Bold) bold++;
+                if (IsMonospace(style)) fixedPitch++;
                 counted++;
             }
 
@@ -950,7 +1028,16 @@ public static class ContentComposer
                 ? TextStyle.Default
                 : counts.OrderByDescending(p => p.Value).First().Key;
 
-            var (starts, stops) = TabGaps(page, visual.Start, visual.End, dominant.SizePoints, knownStops);
+            // An entry with a leader is one tab: the dots are Word's to draw, and the gaps inside them are not
+            // the parts of a line set in columns.
+            // Code keeps its own spacing, character for character; nothing in it is a tab or a leader. A line
+            // is code only when nearly all of it is monospaced: "Study online at quizlet.com/x" with the
+            // address in a fixed-width face is a sentence with a link in it.
+            bool code = counted > 0 && fixedPitch >= counted * 0.9;
+            var leader = code ? null : FindLeader(page, visual.Start, visual.End, visual.Bounds.Right, dominant.SizePoints);
+            var (starts, stops) = leader is null && !code
+                ? TabGaps(page, visual.Start, visual.End, dominant.SizePoints, knownStops)
+                : ([], []);
             return new Line
             {
                 Start = visual.Start,
@@ -961,8 +1048,76 @@ public static class ContentComposer
                 AllBold = counted > 0 && bold >= counted * 0.8,
                 TabStarts = starts,
                 TabStops = stops,
+                Leader = leader,
+                Monospace = code,
             };
         }
+
+        /// <summary>
+        /// A leader: four or more dots (or middle dots, hyphens, underscores), spaced or not, running from the
+        /// text of an entry to a short tail at the end of the line — a page number, a price, a reference. It
+        /// has to be at least two ems long, which an ellipsis in a sentence never is.
+        /// </summary>
+        private static LineLeader? FindLeader(PageContent page, int start, int end, double right, double size)
+        {
+            string text = page.Text.Text;
+            while (end > start && char.IsWhiteSpace(text[end - 1])) end--;
+
+            for (int i = start; i < end; i++)
+            {
+                if (LeaderKind(text[i]) is not { } kind) continue;
+
+                int count = 0, last = i, j = i;
+                for (; j < end; j++)
+                {
+                    char c = text[j];
+                    if (LeaderKind(c) == kind)
+                    {
+                        count += c == '…' ? 3 : 1;
+                        last = j;
+                    }
+                    else if (!(char.IsWhiteSpace(c) && j + 1 < end && LeaderKind(text[j + 1]) == kind)) break;
+                }
+
+                int tail = last + 1;
+                while (tail < end && char.IsWhiteSpace(text[tail])) tail++;
+                bool before = false;
+                for (int k = start; k < i && !before; k++) before = char.IsLetterOrDigit(text[k]);
+
+                if (count >= 4 && before && tail < end && end - tail <= 15 && IsReference(text[tail..end], kind) &&
+                    page.Text.TryGetBox(i, out var first) && page.Text.TryGetBox(last, out var final) &&
+                    (final.Right - first.Left) * page.Size.Width >= size * 2)
+                {
+                    // Whatever the tail holds, it has no leader of its own: the last run of dots is the leader.
+                    var further = FindLeader(page, tail, end, right, size);
+                    return further ?? new LineLeader(i, tail, right, kind);
+                }
+                i = Math.Max(i, j - 1);
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// What a leader leads to: a page number or a numbered reference ("12", "xiv", "A-3", "12–14",
+        /// "$4.50"). A blank in a sentence — "the ____ of the results" — leads to the rest of the sentence,
+        /// and a line of underscores or hyphens is a blank to fill in unless a bare number follows it.
+        /// </summary>
+        private static bool IsReference(string tail, DocxTabLeader kind)
+        {
+            tail = tail.Trim();
+            if (tail.Length == 0) return false;
+            if (kind is DocxTabLeader.Underscore or DocxTabLeader.Hyphen) return tail.All(char.IsDigit);
+            return tail.Any(char.IsDigit) || RomanNumeral.IsMatch(tail);
+        }
+
+        private static DocxTabLeader? LeaderKind(char c) => c switch
+        {
+            '.' or '…' => DocxTabLeader.Dot,
+            '·' or '∙' or '•' => DocxTabLeader.MiddleDot,
+            '_' => DocxTabLeader.Underscore,
+            '-' => DocxTabLeader.Hyphen,
+            _ => null,
+        };
 
         /// <summary>
         /// Gaps inside a line far wider than its word spaces: the line is set in parts that line up with
@@ -1028,6 +1183,12 @@ public static class ContentComposer
         }
     }
 
+    /// <summary>
+    /// The leader of a line: its characters run from <see cref="Start"/> up to where the tail begins at
+    /// <see cref="End"/>, and the tail ends at <see cref="Right"/>, normalized — where a right-aligned stop goes.
+    /// </summary>
+    private sealed record LineLeader(int Start, int End, double Right, DocxTabLeader Kind);
+
     private sealed class Para
     {
         public required List<Line> Lines { get; init; }
@@ -1044,6 +1205,12 @@ public static class ContentComposer
         /// <summary>The PDF's own tags settled what this paragraph is, so no heuristic may overrule it.</summary>
         public bool Tagged { get; set; }
 
+        /// <summary>The shaded panel the paragraph is set in, if any.</summary>
+        public Panel? Panel { get; set; }
+
+        /// <summary>Set in a monospaced face throughout: code, whose line breaks and spacing are kept.</summary>
+        public bool Code => Lines.Count > 0 && Lines.All(l => l.Monospace);
+
         public IReadOnlyList<(int Start, int End)> Ranges => [.. Lines.Select(l => (l.Start, l.End))];
 
         public double Size => Lines.Count == 0 ? 11 : Lines[0].Style.SizePoints;
@@ -1051,7 +1218,8 @@ public static class ContentComposer
         public string Text => string.Join(" ", Lines.Select(l => l.Text));
     }
 
-    private static List<Para> GroupParagraphs(List<Line> lines, RectD column, PageContent page)
+    private static List<Para> GroupParagraphs(
+        List<Line> lines, RectD column, PageContent page, Dictionary<Line, (Panel? Panel, int Table)>? regions = null)
     {
         var result = new List<Para>();
         if (lines.Count == 0) return result;
@@ -1063,7 +1231,7 @@ public static class ContentComposer
         {
             var previous = lines[i - 1];
             var line = lines[i];
-            if (StartsNewParagraph(previous, line, current, column, medianGap, page))
+            if (Region(previous) != Region(line) || StartsNewParagraph(previous, line, current, column, medianGap, page))
             {
                 result.Add(Finish(current, column));
                 current = [line];
@@ -1076,9 +1244,12 @@ public static class ContentComposer
         result.Add(Finish(current, column));
         return result;
 
-        static Para Finish(List<Line> lines, RectD column)
+        (Panel? Panel, int Table) Region(Line line) =>
+            regions is not null && regions.TryGetValue(line, out var region) ? region : (null, -1);
+
+        Para Finish(List<Line> lines, RectD column)
         {
-            var para = new Para { Lines = [.. lines], Column = column, Bounds = Bounds(lines) };
+            var para = new Para { Lines = [.. lines], Column = column, Bounds = Bounds(lines), Panel = Region(lines[0]).Panel };
             para.Alignment = DetectAlignment(para);
             return para;
         }
@@ -1093,11 +1264,22 @@ public static class ContentComposer
         // A line that opens with a bullet or a number is a new item, whatever the geometry says. Without
         // this a list whose items are all one line and all the same width reads as a single paragraph,
         // because no line in it ever stops short of the others.
+        // Code is set line by line, and its indentation is its structure: a listing stays one block,
+        // whatever its short lines and indented lines would say about prose. A blank line or two inside it
+        // is part of it — they come back as empty lines — and only a wider gap ends it.
+        bool previousCode = previous.Monospace, lineCode = line.Monospace;
+        if (previousCode != lineCode) return true;
+        if (lineCode) return gap > height * 2.6 || Math.Abs(previous.Style.SizePoints - line.Style.SizePoints) > 0.5;
+
         if (OpensAListItem(line.Text)) return true;
 
         // A line set in parts — a row of a table drawn without rules, a term and its definition — is an
         // entry of its own; run into the line before, its parts would lose where they line up.
         if (line.TabStarts.Count > 0) return true;
+
+        // An entry of a contents page ends at its page number. The next line is the next entry, however
+        // close under it and however far across it starts.
+        if (previous.Leader is not null) return true;
 
         // A clear jump down always ends the paragraph.
         double threshold = medianGap > 0 ? Math.Max(medianGap * ParagraphGapRatio, medianGap + height * 0.35) : height * 0.5;
@@ -1115,11 +1297,19 @@ public static class ContentComposer
         // whether that word would have fitted. A fixed fraction of the measure gets this wrong constantly.
         double indentSlack = Math.Max(column.Width * ShortLineFraction, AverageCharWidth(previous) * 2);
         bool previousIsFlushLeft = previous.Bounds.Left <= column.Left + indentSlack;
-        double nextWord = FirstWordWidth(line, page) + AverageCharWidth(previous) * 0.6;
+        double firstWord = FirstWordWidth(line, page);
+        double nextWord = firstWord + AverageCharWidth(previous) * 0.6;
+
+        // A third of the measure left empty ends the paragraph whatever comes next — but only where the next
+        // line has no word breaks to measure by: text set without spaces, as Chinese and Japanese are, reads
+        // as one word the width of the line. Anywhere else the word decides; in a narrow table cell a third
+        // of the measure is less than one long word, and that word wrapped.
+        bool clearlyShort(double room) =>
+            room > column.Width * 0.35 && firstWord >= line.Bounds.Width * 0.9 && line.Bounds.Width >= column.Width * 0.9;
         if (previousIsFlushLeft)
         {
             double room = column.Right - previous.Bounds.Right;
-            if (room > nextWord || room > column.Width * 0.35) return true;
+            if (room > nextWord || clearlyShort(room)) return true;
         }
         else if (Math.Abs(previous.Bounds.Left - line.Bounds.Left) <= Math.Max(height * 0.3, 0.002) &&
                  Math.Abs(previous.Bounds.Left - current[0].Bounds.Left) <= Math.Max(height * 0.3, 0.002))
@@ -1128,6 +1318,15 @@ public static class ContentComposer
             // and its measure is its own: room is judged against the widest line of the block, not the column.
             double measure = Math.Max(current.Max(l => l.Bounds.Right), line.Bounds.Right);
             if (measure - previous.Bounds.Right > nextWord) return true;
+        }
+        else if (HangingTextLeft(current[0], page) is { } hang &&
+                 Math.Abs(line.Bounds.Left - hang) <= Math.Max(height * 0.5, AverageCharWidth(previous)))
+        {
+            // The next line of a list item, hanging under its text. The item is set to the column's measure
+            // like any paragraph, so its room is judged against the column's edge — never as centred text,
+            // however evenly its indent and its last line's shortfall happen to balance.
+            double room = column.Right - previous.Bounds.Right;
+            if (room > nextWord || clearlyShort(room)) return true;
         }
         else if (IsCentred(previous.Bounds, column))
         {
@@ -1170,7 +1369,9 @@ public static class ContentComposer
     private static bool IsCentredBlock(List<Line> lines, RectD column)
     {
         if (column.Width <= 0 || lines.Count == 0) return false;
-        double tolerance = column.Width * 0.02;
+        // Glyph boxes are a point or two off the advance either side; in a narrow cell that is more than
+        // a fiftieth of the measure.
+        double tolerance = Math.Max(column.Width * 0.02, 0.004);
         bool symmetric = lines.All(l => Math.Abs((l.Bounds.Left - column.Left) - (column.Right - l.Bounds.Right)) <= tolerance);
         return symmetric && lines.Any(l => l.Bounds.Left - column.Left > column.Width * 0.015);
     }
@@ -1180,7 +1381,33 @@ public static class ContentComposer
         if (column.Width <= 0) return false;
         double left = line.Left - column.Left, right = column.Right - line.Right;
         double margin = column.Width * 0.04;
-        return left > margin && right > margin && Math.Abs(left - right) <= column.Width * 0.03;
+        return left > margin && right > margin && Math.Abs(left - right) <= column.Width * 0.02;
+    }
+
+    /// <summary>
+    /// Lines centred in the column: each clear of both edges by the same amount, give or take the width of a
+    /// letter. Lines that also share a left edge are text set from the left that happens to balance — a
+    /// single indented line ending where its indent began, an item whose lines wrap alike — unless they sit
+    /// so far in from both edges that nothing but centring puts them there.
+    /// </summary>
+    private static bool IsCentredText(List<Line> lines, RectD column, double tolerance)
+    {
+        // A line that fills the measure fits centring as well as anything else does: a centred note of two
+        // lines is one full line and a short one in the middle under it.
+        double symmetry = Math.Max(column.Width * 0.02, tolerance);
+        var inset = new List<Line>();
+        foreach (var line in lines)
+        {
+            double left = line.Bounds.Left - column.Left, right = column.Right - line.Bounds.Right;
+            if (Math.Abs(left - right) > symmetry) return false;
+            if (left > tolerance && right > tolerance) inset.Add(line);
+        }
+        if (inset.Count == 0) return false;
+
+        double least = inset.Min(l => l.Bounds.Left) - column.Left;
+        double spread = lines.Max(l => l.Bounds.Left) - lines.Min(l => l.Bounds.Left);
+        if (lines.Count > 1 && spread > tolerance) return true;
+        return least > column.Width * (lines.Count > 1 ? 0.08 : 0.04);
     }
 
     private static DocxAlignment DetectAlignment(Para para)
@@ -1203,10 +1430,12 @@ public static class ContentComposer
 
         if (leftFlush) return DocxAlignment.Left;
 
-        double center = column.Center.X;
-        bool centred = lines.All(l => Math.Abs(l.Bounds.Center.X - center) <= tolerance * 2.5) &&
-                       lines.All(l => l.Bounds.Left > column.Left + tolerance);
-        if (centred) return DocxAlignment.Center;
+        // A list item and an entry with a leader are set from the left whatever their width: an item whose
+        // indent happens to match the room its last word left at the right is not centred.
+        if (OpensAListItem(lines[0].Text) || AmbiguousBullet.IsMatch(lines[0].Text) || lines.Any(l => l.Leader is not null))
+            return DocxAlignment.Left;
+
+        if (IsCentredText(lines, column, tolerance)) return DocxAlignment.Center;
 
         if (rightFlush) return DocxAlignment.Right;
         return DocxAlignment.Left;
@@ -1297,6 +1526,10 @@ public static class ContentComposer
         {
             if (para.List != DocxListKind.None || para.Tagged) continue;
 
+            // A contents entry names a heading, and a bookmark to that heading may even land on it; it is
+            // still an entry, set as the page set it.
+            if (para.Code || para.Lines.Any(l => l.Leader is not null)) continue;
+
             // A bookmark pointing into this paragraph is not a guess: it names the heading and its depth.
             foreach (var (y, depth, title) in headings[pageIndex])
             {
@@ -1340,6 +1573,15 @@ public static class ContentComposer
         return ka.StartsWith(kb, StringComparison.OrdinalIgnoreCase) || kb.StartsWith(ka, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static readonly Regex RomanNumeral = new(@"^[ivxlcdm]{1,7}$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    private static readonly Regex MonospaceFamily = new(
+        @"mono|courier|consolas|menlo|monaco|lucida console|typewriter|inconsolata|fira ?code|source ?code|cascadia|andale",
+        RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>A monospaced face: what code, a terminal session or a fixed-width listing is set in.</summary>
+    private static bool IsMonospace(TextStyle style) => MonospaceFamily.IsMatch(style.FontFamily);
+
     private static readonly Regex BulletMarker = new(@"^([•◦‣▪●○·⁃∙])\s+", RegexOptions.Compiled);
     private static readonly Regex AmbiguousBullet = new(@"^([-–—*o])\s+", RegexOptions.Compiled);
     private static readonly Regex NumberMarker = new(@"^\(?(\d{1,3}|[a-zA-Z]|[ivxlcdmIVXLCDM]{1,6})[.)]\s+", RegexOptions.Compiled);
@@ -1380,7 +1622,9 @@ public static class ContentComposer
 
         for (int i = 0; i < paragraphs.Count; i++)
         {
-            if (paragraphs[i].Tagged) continue;
+            // "2. Portfolio .......... 7" is an entry of a contents page, not the second item of a list, and
+            // "- x" in a listing is code.
+            if (paragraphs[i].Tagged || paragraphs[i].Code || paragraphs[i].Lines.Any(l => l.Leader is not null)) continue;
             string text = paragraphs[i].Lines.Count > 0 ? paragraphs[i].Lines[0].Text : string.Empty;
             if (BulletMarker.Match(text) is { Success: true } bullet)
             {
@@ -1432,7 +1676,14 @@ public static class ContentComposer
         double pageWidth = page.Size.Width;
 
         int indent = 0, firstLine = 0;
-        if (para.List == DocxListKind.None)
+        if (para.Code)
+        {
+            // The block's own indentation is in its spaces; the paragraph starts where its leftmost line does.
+            double left = para.Lines.Min(l => CodeLineLeft(l, page));
+            indent = PointsToTwips((left - para.Column.Left) * pageWidth);
+            if (indent < 40) indent = 0;
+        }
+        else if (para.List == DocxListKind.None)
         {
             double left = para.Lines.Min(l => l.Bounds.Left);
             indent = PointsToTwips((left - para.Column.Left) * pageWidth);
@@ -1502,6 +1753,16 @@ public static class ContentComposer
             {
                 tabStops.Add(new DocxTabStop(last, DocxAlignment.Left));
             }
+        }
+
+        // A contents entry: the page number set against a right-aligned stop where it ended, with the dots
+        // drawn as the stop's leader. A point or two past the margin is the same margin measured off glyphs.
+        if (para.Lines.FirstOrDefault(l => l.Leader is not null)?.Leader is { } leader)
+        {
+            int position = PointsToTwips((leader.Right - para.Column.Left) * pageWidth);
+            int measureTwips = PointsToTwips(measure);
+            if (position > measureTwips && position - measureTwips <= PointsToTwips(6)) position = measureTwips;
+            tabStops.Add(new DocxTabStop(position, DocxAlignment.Right) { Leader = leader.Kind });
         }
 
         return new DocxParagraph(runs)
@@ -1599,8 +1860,10 @@ public static class ContentComposer
         double paraSize = para.Size;
 
         // A centred or right-aligned block — a title, an address, a verse — is broken where its author broke
-        // it, and reflowing it would set it differently for no gain in editing: it is short by nature.
-        bool keepBreaks = options.PreserveLineBreaks || para.Alignment is DocxAlignment.Center or DocxAlignment.Right;
+        // it, and reflowing it would set it differently for no gain in editing: it is short by nature. Code
+        // is broken where it was written, always.
+        bool keepBreaks = options.PreserveLineBreaks || para.Code || para.Alignment is DocxAlignment.Center or DocxAlignment.Right;
+        var grid = para.Code ? CodeGrid(para, page) : null;
 
         void Flush()
         {
@@ -1635,14 +1898,56 @@ public static class ContentComposer
                 joinedByHyphen = true;
             }
 
-            var tracking = Tracking(line, page);
+            var tracking = grid is null ? Tracking(line, page) : NoTracking;
             bool tabs = line.TabStarts.Count > 0 && para.Alignment is not (DocxAlignment.Center or DocxAlignment.Right);
+
+            // Code: every character goes back to its column, the spaces before it made up from where it
+            // stands. The PDF draws indentation and runs of spaces as a jump, and reading it back as one
+            // space would flatten every block of code to its left margin.
+            double origin = grid is { } g0 ? (g0.PerLine ? CodeLineLeft(line, page) : g0.Origin) : 0;
+            int column = 0;
 
             for (int i = from; i < to; i++)
             {
                 char c = text[i];
                 if (c == '\n') continue;
                 if (tracking.Skip.Contains(i)) continue;
+
+                if (grid is { } g)
+                {
+                    if (char.IsWhiteSpace(c)) continue;
+                    if (page.Text.TryGetBox(i, out var cell) && !cell.IsEmpty)
+                    {
+                        int at = (int)Math.Round((cell.Left - origin) * page.Size.Width / g.CharWidth);
+                        if (at > column)
+                        {
+                            if (key is null) key = KeyFor(i, c, page, extras, para, line, paraSize, options);
+                            buffer.Append(' ', Math.Min(at - column, 200));
+                            column = at;
+                        }
+                    }
+                    var codeKey = KeyFor(i, c, page, extras, para, line, paraSize, options);
+                    if (key is not { } ck || !ck.Equals(codeKey))
+                    {
+                        Flush();
+                        key = codeKey;
+                    }
+                    buffer.Append(c);
+                    column++;
+                    continue;
+                }
+
+                if (line.Leader is { } leader && i == leader.Start)
+                {
+                    // The dots become a single tab, and the stop it goes to draws them.
+                    while (buffer.Length > 0 && buffer[^1] == ' ') buffer.Length--;
+                    if (buffer.Length == 0 && runs.Count > 0 && runs[^1].Text.EndsWith(' '))
+                        runs[^1] = runs[^1] with { Text = runs[^1].Text.TrimEnd(' ') };
+                    if (key is null) key = KeyFor(i, c, page, extras, para, line, paraSize, options) with { Spacing = tracking.Twips };
+                    buffer.Append('\t');
+                    i = Math.Max(i, leader.End - 1);
+                    continue;
+                }
 
                 if (tabs && line.TabStarts.Contains(i))
                 {
@@ -1675,6 +1980,13 @@ public static class ContentComposer
             if (keepBreaks && index < para.Lines.Count - 1)
             {
                 buffer.Append('\n');
+
+                // The blank lines of a listing, one for each line step skipped.
+                if (grid is { LineStep: > 0 } g1)
+                {
+                    int blank = (int)Math.Round((para.Lines[index + 1].Bounds.Top - line.Bounds.Top) / g1.LineStep) - 1;
+                    if (blank > 0) buffer.Append('\n', Math.Min(blank, 3));
+                }
             }
             else if (index < para.Lines.Count - 1 && !joinedByHyphen && buffer.Length > 0 &&
                 !(buffer[^1] == '-' && to - from > 1 && char.IsLetter(text[to - 2]) &&
@@ -1688,6 +2000,49 @@ public static class ContentComposer
         Flush();
         if (runs.Count == 0) runs.Add(new DocxRun(string.Empty, para.Lines.Count > 0 ? para.Lines[0].Style : TextStyle.Default));
         return runs;
+    }
+
+    /// <summary>
+    /// The character grid of a block of code: how wide one character is, from how far apart the letters
+    /// of its words stand, and where column zero is — the leftmost character of the block, or of each line
+    /// when the block is centred, where the lines' own positions are the alignment's doing.
+    /// </summary>
+    private sealed record CodeGridInfo(double CharWidth, double Origin, bool PerLine, double LineStep);
+
+    private static CodeGridInfo CodeGrid(Para para, PageContent page)
+    {
+        var steps = new List<double>();
+        foreach (var line in para.Lines)
+        {
+            for (int i = line.Start; i + 1 < line.End; i++)
+            {
+                if (char.IsWhiteSpace(page.Text.Text[i]) || char.IsWhiteSpace(page.Text.Text[i + 1])) continue;
+                if (page.Text.TryGetBox(i, out var a) && page.Text.TryGetBox(i + 1, out var b) && !a.IsEmpty && !b.IsEmpty)
+                    steps.Add((b.Left - a.Left) * page.Size.Width);
+            }
+        }
+        double width = steps.Count >= 3 ? Median(steps) : para.Size * 0.6;
+        if (width < para.Size * 0.3 || width > para.Size) width = para.Size * 0.6;
+
+        bool perLine = para.Alignment is DocxAlignment.Center or DocxAlignment.Right;
+        double origin = para.Lines.Min(l => CodeLineLeft(l, page));
+
+        // The listing's line step, from its closest lines: a blank line shows as a step twice as long.
+        var lineSteps = new List<double>();
+        for (int i = 1; i < para.Lines.Count; i++)
+            lineSteps.Add(para.Lines[i].Bounds.Top - para.Lines[i - 1].Bounds.Top);
+        lineSteps.RemoveAll(d => d <= 0);
+        lineSteps.Sort();
+        double step = lineSteps.Count > 0 ? lineSteps[lineSteps.Count / 4] : 0;
+        return new CodeGridInfo(width, origin, perLine, step);
+    }
+
+    /// <summary>Where a line's first visible character starts: leading spaces are drawn, and are no indent.</summary>
+    private static double CodeLineLeft(Line line, PageContent page)
+    {
+        for (int i = line.Start; i < line.End; i++)
+            if (!char.IsWhiteSpace(page.Text.Text[i]) && page.Text.TryGetBox(i, out var box) && !box.IsEmpty) return box.Left;
+        return line.Bounds.Left;
     }
 
     private readonly record struct RunKey(
@@ -1867,6 +2222,7 @@ public static class ContentComposer
                     ColumnSpan = span,
                     VerticalMerge = continues ? 2 : startsMerge ? 1 : 0,
                     Shading = ShadingFor(area, grid.Bounds, page),
+                    VerticalAlignment = continues || startsMerge ? DocxVerticalAlignment.Top : VerticalAlignmentOf(area, page),
                 });
                 c += span;
             }
@@ -1900,6 +2256,23 @@ public static class ContentComposer
             CellTopPaddingTwips = topPadding,
             IndentTwips = TableIndent(grid.Columns[0], page, profile, borders ? 0 : padding),
         };
+    }
+
+    /// <summary>
+    /// Where a cell's text sits in a row taller than it: centred when the room above it and below it is
+    /// the same. Only a cell with room to spare says anything — in one its text fills, top and centre are
+    /// the same place — so anything short of clear centring stays at Word's default, the top.
+    /// </summary>
+    private static DocxVerticalAlignment VerticalAlignmentOf(RectD area, PageContent page)
+    {
+        var lines = LinesInside(page, area);
+        if (lines.Count == 0) return DocxVerticalAlignment.Top;
+        var text = Bounds(lines);
+        double height = page.Size.Height;
+        double above = (text.Top - area.Top) * height, below = (area.Bottom - text.Bottom) * height;
+        double size = lines[0].Style.SizePoints;
+        if (above + below < size * 1.5) return DocxVerticalAlignment.Top;
+        return Math.Abs(above - below) <= Math.Max(2, size * 0.3) ? DocxVerticalAlignment.Center : DocxVerticalAlignment.Top;
     }
 
     /// <summary>The weight and colour of a table's rules: the typical one, since a table draws them all alike.</summary>
@@ -2237,6 +2610,199 @@ public static class ContentComposer
         return lines;
     }
 
+    // ---- panels ----
+
+    /// <summary>
+    /// A shaded panel the page sets text in — a note, a warning, a callout — with the lines drawn along any
+    /// of its edges. <see cref="Bounds"/> takes in those lines, so it is the panel as the reader sees it.
+    /// </summary>
+    private sealed record Panel(RectD Bounds, uint Fill, PanelEdge? Top, PanelEdge? Left, PanelEdge? Bottom, PanelEdge? Right);
+
+    private readonly record struct PanelEdge(uint Color, double WidthPoints);
+
+    /// <summary>
+    /// The panels on a page. A PDF draws one as a filled rectangle, often patched together from a piece per
+    /// line of text, with its borders as thin rules or thin rectangles of their own; Word, which is where
+    /// most of them come from, stores it as shading and borders on the paragraphs inside. Only a panel
+    /// that holds whole lines of text is one: a table's cells are the table's, a page background is behind
+    /// everything, and a band across part of a line is a highlight.
+    /// </summary>
+    private static List<Panel> FindPanels(PageContent page, DocumentProfile profile, List<Line> lines, List<RectD> tables)
+    {
+        var panels = new List<Panel>();
+        if (page.Fills.Count == 0 || lines.Count == 0) return panels;
+        double width = page.Size.Width, height = page.Size.Height;
+        double measure = (width - profile.Margins.Left - profile.Margins.Right) / width;
+        const double Thin = 6;   // points: a filled rectangle this narrow is a border, not a panel
+
+        // Pieces of one colour that touch are one panel.
+        var regions = new List<(RectD Bounds, uint Color)>();
+        foreach (var fill in page.Fills)
+        {
+            if (fill.Color == 0xFFFFFF) continue;
+            if (fill.Bounds.Width * width <= Thin || fill.Bounds.Height * height <= Thin) continue;
+            var bounds = fill.Bounds;
+            for (int i = regions.Count - 1; i >= 0; i--)
+            {
+                if (regions[i].Color != fill.Color || !regions[i].Bounds.Inflate(1.5 / width, 1.5 / height).Intersects(bounds)) continue;
+                bounds = bounds.Union(regions[i].Bounds);
+                regions.RemoveAt(i);
+            }
+            regions.Add((bounds, fill.Color));
+        }
+
+        foreach (var (region, color) in regions)
+        {
+            if (region.Width < measure * 0.3 || region.Height < profile.GlyphHeight) continue;
+            // A fill behind nearly the whole page is the page's colour, not a panel; a listing that runs on
+            // for a page or more still leaves the margins clear.
+            if (region.Width * region.Height > 0.8) continue;
+            if (tables.Any(t => t.Inflate(2 / width, 2 / height).Intersects(region))) continue;
+
+            var hold = region.Inflate(1.5 / width, 1.5 / height);
+            bool any = false, crossed = false;
+            foreach (var line in lines)
+            {
+                if (Encloses(hold, line.Bounds)) any = true;
+                else if (line.Bounds.Intersect(region) is { IsEmpty: false } part &&
+                         part.Width * part.Height > line.Bounds.Width * line.Bounds.Height * 0.2) crossed = true;
+            }
+            if (!any || crossed) continue;
+
+            var top = Edge(region, color, horizontal: true, atStart: true);
+            var left = Edge(region, color, horizontal: false, atStart: true);
+            var bottom = Edge(region, color, horizontal: true, atStart: false);
+            var right = Edge(region, color, horizontal: false, atStart: false);
+            var outer = new RectD(
+                region.Left - (left?.WidthPoints ?? 0) / width, region.Top - (top?.WidthPoints ?? 0) / height,
+                region.Right + (right?.WidthPoints ?? 0) / width, region.Bottom + (bottom?.WidthPoints ?? 0) / height);
+            panels.Add(new Panel(outer, color, top, left, bottom, right));
+        }
+        return panels;
+
+        // The line along one side: rules and thin rectangles lying on that edge, in a colour of their own,
+        // covering at least half of it. A line in the panel's own colour only extends the shading.
+        PanelEdge? Edge(RectD region, uint fill, bool horizontal, bool atStart)
+        {
+            double reach = 1.5;
+            double edge = horizontal ? (atStart ? region.Top : region.Bottom) : (atStart ? region.Left : region.Right);
+            double scale = horizontal ? height : width;
+            var covered = new Dictionary<uint, (double Length, double Thickness)>();
+
+            var segments = page.Rules.Select(r => (r.Bounds, r.Color))
+                .Concat(page.Fills.Select(f => (f.Bounds, f.Color)));
+            foreach (var (bounds, color) in segments)
+            {
+                if (color == fill) continue;
+                double thickness = (horizontal ? bounds.Height : bounds.Width) * scale;
+                if (thickness > Thin || thickness <= 0) continue;
+                double from = horizontal ? bounds.Top : bounds.Left, to = horizontal ? bounds.Bottom : bounds.Right;
+                if (from * scale > edge * scale + reach || to * scale < edge * scale - reach) continue;
+
+                double overlap = horizontal
+                    ? Math.Min(bounds.Right, region.Right) - Math.Max(bounds.Left, region.Left)
+                    : Math.Min(bounds.Bottom, region.Bottom) - Math.Max(bounds.Top, region.Top);
+                if (overlap <= 0) continue;
+                var known = covered.GetValueOrDefault(color);
+                covered[color] = (known.Length + overlap, Math.Max(known.Thickness, thickness));
+            }
+
+            double span = horizontal ? region.Width : region.Height;
+            var best = covered.Where(c => c.Value.Length >= span * 0.5).OrderByDescending(c => c.Value.Length).FirstOrDefault();
+            return best.Value.Length > 0 ? new PanelEdge(best.Key, Math.Clamp(best.Value.Thickness, 0.25, 6)) : null;
+        }
+    }
+
+    /// <summary>The panel a line of text sits in, if any.</summary>
+    private static Panel? PanelOf(Line line, List<Panel> panels, PageContent page)
+    {
+        foreach (var panel in panels)
+            if (Encloses(panel.Bounds.Inflate(1.5 / page.Size.Width, 1.5 / page.Size.Height), line.Bounds)) return panel;
+        return null;
+    }
+
+    private static bool Encloses(RectD outer, RectD inner) =>
+        inner.Left >= outer.Left && inner.Right <= outer.Right && inner.Top >= outer.Top && inner.Bottom <= outer.Bottom;
+
+    /// <summary>
+    /// Puts each run of paragraphs set in the same panel into a box: shading and a border on every side,
+    /// the same on each paragraph so Word draws them as one. The borders' distance from the text is the
+    /// padding the panel showed, and the room they take comes out of the spacing around the panel, which
+    /// was measured to the text and so already includes it.
+    /// </summary>
+    private static void AttachPanels(
+        List<DocxBlock> blocks, List<(Para Para, int Block)> placed, PageContent page, DocumentProfile profile,
+        ExportOptions options)
+    {
+        double width = page.Size.Width, height = page.Size.Height;
+        for (int start = 0; start < placed.Count;)
+        {
+            var panel = placed[start].Para.Panel;
+            int end = start + 1;
+            while (end < placed.Count && placed[end].Para.Panel == panel && placed[end].Block == placed[end - 1].Block + 1) end++;
+            if (panel is null || placed.Skip(start).Take(end - start).Any(p => blocks[p.Block] is not DocxParagraph))
+            {
+                start = end;
+                continue;
+            }
+
+            var first = placed[start].Para;
+            var last = placed[end - 1].Para;
+            double topWidth = panel.Top?.WidthPoints ?? 0.5, bottomWidth = panel.Bottom?.WidthPoints ?? 0.5;
+            double leftWidth = panel.Left?.WidthPoints ?? 0.5, rightWidth = panel.Right?.WidthPoints ?? 0.5;
+
+            // Word's line box starts above the glyphs by the paragraph's text offset, and ends a pitch lower.
+            double firstPitch = PitchOf(first, page, profile), lastPitch = PitchOf(last, page, profile);
+            double textTop = first.Lines[0].Bounds.Top * height - TextOffset(first, firstPitch, page, options);
+            double textBottom = last.Lines[^1].Bounds.Top * height - TextOffset(last, lastPitch, page, options) + lastPitch;
+            double topSpace = Math.Clamp(textTop - panel.Bounds.Top * height - topWidth, 0, 31);
+            double bottomSpace = Math.Clamp(panel.Bounds.Bottom * height - textBottom - bottomWidth, 0, 31);
+
+            double textRight = placed.Skip(start).Take(end - start).Max(p => p.Para.Bounds.Right) * width;
+            for (int i = start; i < end; i++)
+            {
+                var (para, index) = placed[i];
+                var paragraph = (DocxParagraph)blocks[index];
+
+                // The left border is drawn its distance outside the paragraph's leftmost text, which with a
+                // hanging first line is the first line's start.
+                double textLeft = para.Column.Left * width + (paragraph.IndentTwips + Math.Min(0, paragraph.FirstLineTwips)) / 20.0;
+                double leftSpace = Math.Clamp(textLeft - panel.Bounds.Left * width - leftWidth, 0, 31);
+
+                // As much room on the right as on the left, unless the text would then no longer fit the
+                // lines it was set in.
+                double rightSpace = Math.Clamp(Math.Min(leftSpace, panel.Bounds.Right * width - rightWidth - textRight - 1), 0, 31);
+                double rightIndent = para.Column.Right * width - panel.Bounds.Right * width + rightSpace + rightWidth;
+
+                var box = new DocxBox(panel.Fill,
+                    Border(panel.Top, panel.Fill, topWidth, topSpace),
+                    Border(panel.Left, panel.Fill, leftWidth, Math.Round(leftSpace)),
+                    Border(panel.Bottom, panel.Fill, bottomWidth, bottomSpace),
+                    Border(panel.Right, panel.Fill, rightWidth, Math.Round(rightSpace)));
+                blocks[index] = paragraph with { Box = box, RightIndentTwips = PointsToTwips(rightIndent) };
+            }
+
+            // The borders' room was measured into the gaps before and after the panel.
+            int firstBlock = placed[start].Block, lastBlock = placed[end - 1].Block;
+            var opening = (DocxParagraph)blocks[firstBlock];
+            blocks[firstBlock] = WithSpaceBefore(opening, Math.Max(0, opening.SpaceBeforeTwips - PointsToTwips(Math.Round(topSpace) + topWidth)));
+            int after = PointsToTwips(Math.Round(bottomSpace) + bottomWidth);
+            var closing = (DocxParagraph)blocks[lastBlock];
+            if (closing.SpaceAfterTwips > 0)
+                blocks[lastBlock] = closing with { SpaceAfterTwips = Math.Max(0, closing.SpaceAfterTwips - after) };
+            else if (lastBlock + 1 < blocks.Count && blocks[lastBlock + 1] is DocxParagraph next)
+                blocks[lastBlock + 1] = WithSpaceBefore(next, Math.Max(0, next.SpaceBeforeTwips - after));
+            else if (lastBlock + 1 < blocks.Count && blocks[lastBlock + 1] is DocxPicture picture)
+                blocks[lastBlock + 1] = picture with { SpaceBeforeTwips = Math.Max(0, picture.SpaceBeforeTwips - after) };
+
+            start = end;
+        }
+
+        // A side the page drew no line on gets one in the panel's own colour, which keeps the padding shaded.
+        static DocxBorder Border(PanelEdge? edge, uint fill, double widthPoints, double space) =>
+            new(edge?.Color ?? fill, Math.Clamp((int)Math.Round(widthPoints * 8), 2, 48), Math.Round(space));
+    }
+
     // ---- images ----
 
     /// <summary>
@@ -2253,7 +2819,7 @@ public static class ContentComposer
     /// </summary>
     private static void PlacePictures(
         PageContent page, DocumentProfile profile, TagIndex tags, ExportOptions options,
-        List<FlowItem> flow, List<Floating> floating)
+        List<FlowItem> flow, List<Floating> floating, List<RectD> redrawn)
     {
         double pageWidth = page.Size.Width, pageHeight = page.Size.Height;
         var textLines = flow.OfType<ParaFlow>().SelectMany(p => p.Para.Lines.Select(l => (Line: l, p.Para))).ToList();
@@ -2267,6 +2833,11 @@ public static class ContentComposer
             double widthPoints = area.Width * pageWidth;
             double heightPoints = area.Height * pageHeight;
             if (widthPoints < 4 || heightPoints < 4) continue;
+
+            // Artwork drawn over a panel's edge or a table's cells — the corners of a border, the fill of a
+            // header row — is the panel or the table, which Word now draws itself.
+            if (image.IsDrawing && redrawn.Any(r => r.Inflate(4 / pageWidth, 4 / pageHeight).Intersect(area) is { IsEmpty: false } part &&
+                                                    part.Width * part.Height >= area.Width * area.Height * 0.6)) continue;
 
             // A tagged PDF names its figures, and that description is the only thing in the document a
             // screen reader can use once the picture has been carried across.
@@ -2366,7 +2937,7 @@ public static class ContentComposer
     /// </summary>
     private static void AttachRules(
         List<DocxBlock> blocks, List<(Para Para, int Block)> placed, PageContent page, DocumentProfile profile,
-        List<RectD> tables)
+        List<RectD> tables, List<Panel> panels)
     {
         if (page.Rules.Count == 0 || placed.Count == 0) return;
         double width = page.Size.Width, height = page.Size.Height;
@@ -2386,6 +2957,7 @@ public static class ContentComposer
             if (bounds.Width * width < 36) continue;
             if (bounds.Bottom <= ContentComposerBands.Header || bounds.Top >= ContentComposerBands.Footer) continue;
             if (tables.Any(t => t.Inflate(0.004, 0.004).Contains(bounds.Center))) continue;
+            if (panels.Any(p => p.Bounds.Inflate(2 / width, 2 / height).Contains(bounds.Center))) continue;
 
             // An underline sits against the foot of a line of text no wider than it.
             bool underline = placed.Any(p => p.Para.Lines.Any(l =>
@@ -2597,11 +3169,15 @@ public static class ContentComposer
             }
 
             // A sentence that visibly runs on to the next page settles it: the author did not end the page.
-            bool runsOn = options.JoinAcrossPages && options.PageBreaks != PageBreakMode.EveryPage &&
+            // So does a table that carries on at the top of the next one with the same columns.
+            bool adjacent = options.JoinAcrossPages && options.PageBreaks != PageBreakMode.EveryPage &&
                 previous is not null && page.PageIndex == previous.Page.PageIndex + 1 &&
-                blocks.Count > 0 && blocks[^1] is DocxParagraph lastTail &&
-                pageBlocks.Count > 0 && pageBlocks[0] is DocxParagraph firstHead &&
-                ContinuesAcrossPages(lastTail, firstHead);
+                blocks.Count > 0 && pageBlocks.Count > 0;
+            bool tableRunsOn = adjacent && blocks[^1] is DocxTable tailTable && pageBlocks[0] is DocxTable headTable &&
+                ContinuesTable(tailTable, headTable);
+            bool runsOn = tableRunsOn || (adjacent &&
+                blocks[^1] is DocxParagraph lastTail && pageBlocks[0] is DocxParagraph firstHead &&
+                ContinuesAcrossPages(lastTail, firstHead));
             bool pageBreak = previous is not null && !sizeChanged && !runsOn && StartsNewPage(previous, current, profile, options);
 
             // Another layout needs a section of its own. Where the page also starts a new page, the section
@@ -2633,6 +3209,11 @@ public static class ContentComposer
                 {
                     PageBreakBefore = pageBreak && !breakBySection,
                 };
+            }
+            else if (tableRunsOn)
+            {
+                blocks[^1] = JoinTables((DocxTable)blocks[^1], (DocxTable)pageBlocks[0]);
+                pageBlocks.RemoveAt(0);
             }
             else if (previous is not null && pageBlocks.Count > 0)
             {
@@ -2715,8 +3296,9 @@ public static class ContentComposer
         double drop = double.IsNaN(previous.ContentTop) ? 0 : Math.Max(0, (previous.ContentTop - areaTop) / area);
         if (free >= 0.08 && free + drop >= 0.25) return true;
 
-        // A new chapter starts a new page, and a page ending with room to spare before one was ended for it.
-        return free >= 0.1 &&
+        // A new chapter starts a new page, and a page ending with room to spare before one was ended for it:
+        // two lines' worth is already more than chance leaves at the foot of a full page.
+        return free >= 0.03 &&
                current.Blocks.FirstOrDefault(b => b is not ZoneBreak) is DocxParagraph { Style: DocxParagraphStyle.Heading1 };
     }
 
@@ -2766,6 +3348,9 @@ public static class ContentComposer
     /// </summary>
     private static bool ContinuesAcrossPages(DocxParagraph tail, DocxParagraph head)
     {
+        // A listing broken by the page, in the same panel on both sides of the break.
+        if (IsListing(tail) && IsListing(head) && tail.Box?.Fill == head.Box?.Fill) return true;
+
         if (tail.Style != DocxParagraphStyle.Body || head.Style != DocxParagraphStyle.Body) return false;
         if (tail.List != DocxListKind.None || head.List != DocxListKind.None) return false;
 
@@ -2778,8 +3363,80 @@ public static class ContentComposer
         return char.IsLower(b[0]) || b[0] is ',' or ';';
     }
 
+    /// <summary>
+    /// A table broken by a page break: the next page opens with a table of the same columns, set at the
+    /// same place. Two tables that merely look alike are further apart than that — a caption, a heading or
+    /// a paragraph stands between them.
+    /// </summary>
+    private static bool ContinuesTable(DocxTable tail, DocxTable head)
+    {
+        if (tail.HasBorders != head.HasBorders || tail.ColumnWidthsTwips.Count != head.ColumnWidthsTwips.Count) return false;
+        if (tail.Rows.Count == 0 || head.Rows.Count == 0) return false;
+        if (Math.Abs(tail.IndentTwips - head.IndentTwips) > 160) return false;
+        for (int i = 0; i < tail.ColumnWidthsTwips.Count; i++)
+        {
+            int a = tail.ColumnWidthsTwips[i], b = head.ColumnWidthsTwips[i];
+            if (Math.Abs(a - b) > Math.Max(160, Math.Max(a, b) * 0.04)) return false;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// One table from its two halves. The header row the PDF printed again at the top of the page is
+    /// dropped and the first one marked to repeat instead, which is how Word prints a header on every page.
+    /// </summary>
+    private static DocxTable JoinTables(DocxTable tail, DocxTable head)
+    {
+        var rows = new List<DocxRow>(tail.Rows);
+        var added = head.Rows.ToList();
+        if (added.Count > 0 && RowText(added[0]) == RowText(rows[0]) && RowText(rows[0]).Length > 0)
+        {
+            added.RemoveAt(0);
+            rows[0] = rows[0] with { IsHeader = true };
+        }
+        rows.AddRange(added);
+        return tail with { Rows = rows };
+
+        static string RowText(DocxRow row) => string.Join("|", row.Cells.Select(c =>
+            string.Concat(c.Blocks.OfType<DocxParagraph>().Select(p => p.Text)).Trim()));
+    }
+
+    /// <summary>A paragraph of code: every run of it in a monospaced face.</summary>
+    private static bool IsListing(DocxParagraph paragraph) =>
+        paragraph.Runs.Count > 0 && paragraph.Runs.Any(r => r.Text.Trim().Length > 0) &&
+        paragraph.Runs.All(r => r.Text.Trim().Length == 0 || IsMonospace(r.Style));
+
     private static DocxParagraph JoinParagraphs(DocxParagraph tail, DocxParagraph head)
     {
+        if (IsListing(tail) && IsListing(head))
+        {
+            // Line for line: the head's first line is the next line of the listing. Its indentation was
+            // measured from its own page's leftmost line, which the tail's may not share; the spaces it
+            // carries are relative to that, and the difference goes back in front of each of its lines.
+            int shift = (int)Math.Round((head.IndentTwips - tail.IndentTwips) / 20.0 / CharWidthOf(tail));
+            var lines = new List<DocxRun>(tail.Runs);
+            string pad = shift > 0 ? new string(' ', Math.Min(shift, 80)) : string.Empty;
+            bool lineStart = true;
+            foreach (var run in head.Runs)
+            {
+                string text = run.Text;
+                if (pad.Length > 0)
+                {
+                    var built = new StringBuilder();
+                    foreach (char c in text)
+                    {
+                        if (lineStart && c != '\n') built.Append(pad);
+                        built.Append(c);
+                        lineStart = c == '\n';
+                    }
+                    text = built.ToString();
+                }
+                lines.Add(run with { Text = text });
+            }
+            if (lines.Count > tail.Runs.Count) lines[tail.Runs.Count] = lines[tail.Runs.Count] with { Text = "\n" + lines[tail.Runs.Count].Text };
+            return tail with { Runs = lines };
+        }
+
         var runs = new List<DocxRun>(tail.Runs);
         if (runs.Count > 0 && runs[^1].Text.Length > 0 && !char.IsWhiteSpace(runs[^1].Text[^1]))
             runs[^1] = runs[^1] with { Text = runs[^1].Text + " " };
@@ -2790,6 +3447,18 @@ public static class ContentComposer
     // ---- shared helpers ----
 
     private static int PointsToTwips(double points) => (int)Math.Round(points * 20, MidpointRounding.AwayFromZero);
+
+    /// <summary>
+    /// The width of one character of a listing, in points: six tenths of an em for most monospaced faces,
+    /// a little less for Consolas and Inconsolata.
+    /// </summary>
+    private static double CharWidthOf(DocxParagraph listing)
+    {
+        var style = listing.Runs.FirstOrDefault(r => r.Text.Trim().Length > 0)?.Style ?? TextStyle.Default;
+        string family = style.FontFamily.ToLowerInvariant();
+        double em = family.Contains("consolas") ? 0.55 : family.Contains("inconsolata") ? 0.5 : 0.6;
+        return Math.Max(1, style.SizePoints * em);
+    }
 
     private static RectD Bounds(IEnumerable<Line> lines)
     {
@@ -2822,15 +3491,33 @@ public static class ContentComposer
     /// an even number of gaps, half of which are the wider gaps *between* paragraphs, the upper median
     /// returns a paragraph gap and then nothing looks like a paragraph break at all.
     /// </summary>
+    /// <summary>
+    /// The usual gap between one line and the next line under it. Only lines stacked one above the other
+    /// count: the cells of a table row sit side by side, and the overlaps and hairline gaps between them
+    /// would drag the median to nothing — and with it the threshold that tells a paragraph break from the
+    /// leading inside one.
+    /// </summary>
     private static double MedianGap(List<Line> lines)
     {
         if (lines.Count < 2) return 0;
         var gaps = new List<double>(lines.Count - 1);
         for (int i = 1; i < lines.Count; i++)
-            gaps.Add(lines[i].Bounds.Top - lines[i - 1].Bounds.Bottom);
+        {
+            double gap = lines[i].Bounds.Top - lines[i - 1].Bounds.Bottom;
+            if (gap > 0 && OverlapsHorizontally(lines[i].Bounds, lines[i - 1].Bounds)) gaps.Add(gap);
+        }
+        if (gaps.Count == 0) return 0;
         gaps.Sort();
         return gaps[(gaps.Count - 1) / 2];
     }
+
+    /// <summary>
+    /// Wholly outside the page as it is shown: a printer's slug below the trim — file name, date, plate
+    /// number — that the PDF keeps but nobody sees. It is not part of the document's text, and measured
+    /// with it, the text area would run from edge to edge.
+    /// </summary>
+    internal static bool IsOffPage(RectD bounds) =>
+        bounds.Bottom <= 0 || bounds.Top >= 1 || bounds.Right <= 0 || bounds.Left >= 1;
 
     internal static double Median(List<double> values)
     {

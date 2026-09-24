@@ -108,8 +108,9 @@ Order of work in `WindowsOcrEngine.RecognizeAsync`:
 The app exports **text PDFs only**. `TextPdfExport.Validate` rejects image-only pages and invisible OCR
 layers before any destination file is created or replaced. It never runs OCR or renders an unsupported page
 as a fallback picture. Illustrations within text pages remain supported; short visible text is still text.
-The app keeps source line endings inside editable paragraphs and starts each source page separately.
-Core also supports reflow for callers that explicitly leave these layout options off.
+The app reflows text into editable paragraphs and keeps a page break only where the PDF's author ended
+the page on purpose; `PreserveLineBreaks` and `PageBreakMode.EveryPage` remain for callers that want the
+source layout instead.
 
 A PDF has no paragraphs, only positioned glyphs, so every structure in the .docx is inferred. The ordering
 principle is that **a rule that does not fire still leaves the content intact**: an unclaimed line becomes a
@@ -151,9 +152,20 @@ correctly styled paragraph in the right place, and nothing is ever dropped to ti
    prompt, which is a hard failure.
 
 ### 5d. Why these rules and not others
-- **Layout and editable text are both required.** App exports keep explicit line breaks and source page
-  boundaries, write zero paragraph gaps explicitly, and avoid justifying hard line breaks. Paper-size
-  section properties attach to the final text paragraph instead of adding an empty paragraph.
+- **Reflow, with the page's own breaks only where it meant them.** Word never sets a line exactly as wide as
+  the PDF did, so kept line breaks leave one-word lines and kept page breaks turn every slightly overfull
+  page into two. Every paragraph gap is written explicitly. Paper-size section properties attach to the
+  final text paragraph instead of adding an empty paragraph.
+- **Structure is carried as Word's own constructs.** A contents entry is a tab to a right-aligned stop with a
+  dot leader; a shaded panel is paragraph shading and borders; code keeps its line breaks and columns; a
+  table broken by a page is one table with a repeating header. Text that only looks like these — literal
+  dots, a floating picture of a box, spaces flattened out of a listing — falls apart the first time the
+  document is edited, which is what a reader converting to Word is about to do.
+- **Indents and centring are measured against the text area**, per page and per side for mirrored margins,
+  never against the extent of the lines on the page: a page of indented items or short centred lines would
+  otherwise move every indent and every centre. A list item is never centred.
+- **A paragraph never crosses a table's or a panel's edge.** A table rebuilds the paragraphs its lines are in
+  as cells, so a line outside it caught in the same paragraph would be lost.
 - **Only a stable, represented header is removed from the body.** A header must occur once on every
   selected consecutive page and differ only in its page number. Other repeating lines and changing chapter
   titles stay in the body. Every page is checked, not just the first five.

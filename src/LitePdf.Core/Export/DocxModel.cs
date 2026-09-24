@@ -93,6 +93,15 @@ public sealed record DocxParagraph(IReadOnlyList<DocxRun> Runs) : DocxBlock
     /// <summary>A rule drawn over the paragraph.</summary>
     public DocxBorder? BorderAbove { get; init; }
 
+    /// <summary>
+    /// The shaded, bordered panel the paragraph is set in: a note, a warning, a callout. Consecutive
+    /// paragraphs with the same box and indents are drawn by Word as one panel.
+    /// </summary>
+    public DocxBox? Box { get; init; }
+
+    /// <summary>Right indent in twips, measured in from the text area's right edge; negative reaches into the margin.</summary>
+    public int RightIndentTwips { get; init; }
+
     public DocxListKind List { get; init; }
     public int ListLevel { get; init; }
 
@@ -127,6 +136,13 @@ public sealed record DocxParagraph(IReadOnlyList<DocxRun> Runs) : DocxBlock
 
 /// <summary>A paragraph rule: colour as 0xRRGGBB, width in eighths of a point, and its distance from the text.</summary>
 public sealed record DocxBorder(uint Color, int Eighths, double SpacePoints);
+
+/// <summary>
+/// A panel behind a run of paragraphs: its fill as 0xRRGGBB, and a border on each side. A side the page
+/// drew no line on still has one, in the fill's own colour: that is how Word keeps the padding between the
+/// text and the panel's edge shaded.
+/// </summary>
+public sealed record DocxBox(uint Fill, DocxBorder Top, DocxBorder Left, DocxBorder Bottom, DocxBorder Right);
 
 public enum DocxLineRule
 {
@@ -182,8 +198,18 @@ public sealed record DocxCell(IReadOnlyList<DocxBlock> Blocks)
     /// <summary>0 = a normal cell, 1 = the top of a vertical merge, 2 = continuing one.</summary>
     public int VerticalMerge { get; init; }
 
+    /// <summary>Where the text sits in a cell taller than it: Word's default is the top.</summary>
+    public DocxVerticalAlignment VerticalAlignment { get; init; }
+
     /// <summary>Background as 0xRRGGBB, or null for none.</summary>
     public uint? Shading { get; init; }
+}
+
+public enum DocxVerticalAlignment
+{
+    Top,
+    Center,
+    Bottom,
 }
 
 public sealed record DocxRow(IReadOnlyList<DocxCell> Cells)
@@ -233,7 +259,20 @@ public readonly record struct DocxMargins(double Left, double Top, double Right,
 }
 
 /// <summary>A tab stop, from the paragraph's left edge, and which way text aligns against it.</summary>
-public readonly record struct DocxTabStop(int PositionTwips, DocxAlignment Alignment);
+public readonly record struct DocxTabStop(int PositionTwips, DocxAlignment Alignment)
+{
+    /// <summary>What fills the space before the stop: the dots of a table of contents.</summary>
+    public DocxTabLeader Leader { get; init; }
+}
+
+public enum DocxTabLeader
+{
+    None,
+    Dot,
+    Hyphen,
+    Underscore,
+    MiddleDot,
+}
 
 /// <summary>Running head or foot. <see cref="PageNumberRun"/> marks which run holds the page number.</summary>
 public sealed record DocxHeaderFooter(IReadOnlyList<DocxRun> Runs, DocxAlignment Alignment)
