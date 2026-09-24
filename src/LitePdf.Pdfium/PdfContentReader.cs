@@ -603,13 +603,18 @@ public sealed unsafe partial class PdfiumDocument
     }
 
     /// <summary>
-    /// How thick a rule is, in points. A filled box is as thick as it is across; a stroked line has no
-    /// width of its own, so its stroke width is it.
+    /// How thick a rule is, in points. A filled box is as thick as it is across. A stroked line's bounds
+    /// are grown by its full stroke width on every side — a 0.8 pt line comes back 1.6 pt across — so its
+    /// thickness is half of that, which also carries whatever scale the line was drawn under. Taken as it
+    /// stands, every stroked table grid came out in Word at twice its weight.
     /// </summary>
     private static double RuleThickness(nint obj, RectD bounds, bool horizontal, PageSize size)
     {
         double across = horizontal ? bounds.Height * size.Height : bounds.Width * size.Width;
-        if (across >= 0.1) return across;
+        int fillMode = 0, stroke = 0;
+        bool strokedOnly = FPDFPath_GetDrawMode(obj, &fillMode, &stroke) != 0 && stroke != 0 && fillMode == FPDF_FILLMODE_NONE;
+        if (strokedOnly && across / 2 >= 0.1) return across / 2;
+        if (!strokedOnly && across >= 0.1) return across;
         float width = 0;
         return FPDFPageObj_GetStrokeWidth(obj, &width) != 0 && width > 0 ? width : 0;
     }
@@ -875,11 +880,20 @@ public sealed unsafe partial class PdfiumDocument
             if (scan.Images.Count >= MaxImagesPerPage) break;
             if (scan.Images.Count(i => i.IsDrawing) >= MaxDrawingsPerPage) break;
 
-            // The rules inside a drawing are its axes and its frame, not a table: take them with it.
+            // The rules inside a drawing are its axes and its frame, not a table: take them with it. A y-axis
+            // also stands off from the marks it measures, a bar's width to the left of the first bar, so an
+            // upright rule as tall as the drawing and running beside it a short way off is taken too. Nothing
+            // further: a table's rules run past a drawing, not beside it.
             var bounds = cluster;
             var reach = cluster.Inflate(0.012, 0.012);
             foreach (var rule in scan.Rules)
-                if (reach.Contains(rule.Bounds.Center)) bounds = bounds.Union(rule.Bounds);
+            {
+                var r = rule.Bounds;
+                bool axis = !rule.IsHorizontal && r.Height >= cluster.Height * 0.5 &&
+                            Overlap(r.Top, r.Bottom, cluster.Top, cluster.Bottom) >= r.Height * 0.6 &&
+                            Distance(r.Left, r.Right, cluster.Left, cluster.Right) <= 0.06;
+                if (reach.Contains(r.Center) || axis) bounds = bounds.Union(r);
+            }
 
             bounds = bounds.Inflate(0.002, 0.002).ClampToUnit();
             if (!IsWorthRasterizing(bounds, context)) continue;
@@ -891,6 +905,11 @@ public sealed unsafe partial class PdfiumDocument
                 scan.Images.Add(PlacedImage.FromBits(bounds, bits) with { IsDrawing = true });
         }
     }
+
+    private static double Overlap(double a0, double a1, double b0, double b1) => Math.Max(0, Math.Min(a1, b1) - Math.Max(a0, b0));
+
+    /// <summary>The gap between two spans, or 0 where they overlap.</summary>
+    private static double Distance(double a0, double a1, double b0, double b1) => Math.Max(0, Math.Max(a0, b0) - Math.Min(a1, b1));
 
     private static bool IsWorthRasterizing(RectD bounds, ScanContext context)
     {

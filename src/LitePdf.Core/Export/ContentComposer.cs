@@ -306,6 +306,22 @@ public static class ContentComposer
         PageContent page, PageExtras extras, DocumentProfile profile,
         ILookup<int, (double Y, int Depth, string Title)> headings, ExportOptions options, CommentSink comments)
     {
+        // A chart's axes are inside the picture it is rasterized into. Left among the page's rules as well,
+        // an axis becomes a border on the caption under it. Only a drawing of some size is a chart: a sliver
+        // of a panel's edge or a table's shaded header rasterized as artwork must not take the panel's
+        // border or the table's grid with it, and a table's rules stay whatever lies over them.
+        if (options.Drawings && page.Rules.Count > 0 && page.Images.Any(i => i.IsDrawing))
+        {
+            var drawn = page.Images
+                .Where(i => i.IsDrawing && i.Bounds.Width * page.Size.Width >= 36 && i.Bounds.Height * page.Size.Height >= 36)
+                .Select(i => i.Bounds.Inflate(2 / page.Size.Width, 2 / page.Size.Height)).ToList();
+            var grid = TableBuilder.Find(page.Rules, profile.GlyphHeight).Select(g => g.Bounds.Inflate(0.003, 0.003)).ToList();
+            page = page with
+            {
+                Rules = [.. page.Rules.Where(r => grid.Any(t => t.Contains(r.Bounds.Center)) || !drawn.Any(d => d.Contains(r.Bounds.Center)))],
+            };
+        }
+
         var tags = options.UseTags ? TagIndex.Build(page) : TagIndex.Empty;
         var lines = ReadLines(page, profile, options);
 
@@ -414,7 +430,13 @@ public static class ContentComposer
         AttachRules(blocks, placed, page, profile, tables.Select(t => t.Bounds).ToList(), panels);
         if (panels.Count > 0) AttachPanels(blocks, placed, page, profile, options);
         AttachFloating(blocks, placed, floating, page, profile, options);
-        if (options.Annotations) AttachComments(blocks, placed, extras, comments);
+        if (options.Annotations)
+        {
+            var tablesPlaced = flow.OfType<TableFlow>()
+                .Select(t => (t.Bounds, Block: blocks.FindIndex(b => ReferenceEquals(b, t.Table))))
+                .Where(t => t.Block >= 0).ToList();
+            AttachComments(blocks, placed, tablesPlaced, extras, comments);
+        }
 
         // Pictures behind the text are decoration, and so is anything standing in the margin beside the text
         // area; everything else is content the page had to make room for.
@@ -710,15 +732,16 @@ public static class ContentComposer
             // the literal text "[Figure]".
             if (text.Source == TextSource.Ocr && raw.AsSpan().Trim().Equals(OcrLayout.FigurePlaceholder, StringComparison.Ordinal)) continue;
 
-            lines.Add(Line.Create(page, visual, raw));
+            lines.Add(Line.Create(page, visual, raw, candidates: true));
             sources.Add((visual, raw));
         }
 
         // Where parts of lines start on two or more lines of the page is a column of the text. Lines are
-        // read again knowing those, so an entry whose gap is narrower still lines up with the rest.
+        // read again knowing those, so an entry whose gap is narrower still lines up with the rest — and a
+        // row of a table drawn without lines, which has nothing but wide gaps, is set in parts only where
+        // other rows start their parts too.
         var shared = SharedStops(lines, page);
-        if (shared.Count > 0)
-            for (int i = 0; i < lines.Count; i++) lines[i] = Line.Create(page, sources[i].Visual, sources[i].Raw, shared);
+        for (int i = 0; i < lines.Count; i++) lines[i] = Line.Create(page, sources[i].Visual, sources[i].Raw, shared);
 
         lines.Sort((a, b) =>
         {
@@ -1008,7 +1031,8 @@ public static class ContentComposer
             return Create(page, new TextLine(start, end, bounds), raw);
         }
 
-        public static Line Create(PageContent page, TextLine visual, string raw, IReadOnlyList<double>? knownStops = null)
+        public static Line Create(
+            PageContent page, TextLine visual, string raw, IReadOnlyList<double>? knownStops = null, bool candidates = false)
         {
             // The dominant style of a line is the style of most of its characters: a line is rarely mixed,
             // and when it is, the majority is what the paragraph should inherit.
@@ -1036,7 +1060,7 @@ public static class ContentComposer
             bool code = counted > 0 && fixedPitch >= counted * 0.9;
             var leader = code ? null : FindLeader(page, visual.Start, visual.End, visual.Bounds.Right, dominant.SizePoints);
             var (starts, stops) = leader is null && !code
-                ? TabGaps(page, visual.Start, visual.End, dominant.SizePoints, knownStops)
+                ? TabGaps(page, visual.Start, visual.End, dominant.SizePoints, knownStops, candidates)
                 : ([], []);
             return new Line
             {
@@ -1127,7 +1151,7 @@ public static class ContentComposer
         /// every space of a line alike.
         /// </summary>
         private static (List<int> Starts, List<double> Stops) TabGaps(
-            PageContent page, int start, int end, double size, IReadOnlyList<double>? knownStops)
+            PageContent page, int start, int end, double size, IReadOnlyList<double>? knownStops, bool candidates = false)
         {
             var words = new List<(int Start, RectD Box)>();
             RectD previous = RectD.Empty;
@@ -1168,11 +1192,13 @@ public static class ContentComposer
             double aligned = Math.Max(Math.Max(size * 0.4, typical * 1.5), 3);
             double tolerance = 2 / width;
 
+            // Looking for the columns lines share, every wide gap is a candidate, word spaces or not: a row
+            // of figures has none. Only the ones other lines agree with survive the second reading.
             var starts = new List<int>();
             var stops = new List<double>();
             for (int k = 1; k < words.Count; k++)
             {
-                bool tab = (spaced && gaps[k - 1] >= threshold) ||
+                bool tab = ((spaced || candidates) && gaps[k - 1] >= threshold) ||
                            (gaps[k - 1] >= aligned && knownStops is not null &&
                             knownStops.Any(x => Math.Abs(x - words[k].Box.Left) <= tolerance));
                 if (!tab) continue;
@@ -1529,6 +1555,9 @@ public static class ContentComposer
             // A contents entry names a heading, and a bookmark to that heading may even land on it; it is
             // still an entry, set as the page set it.
             if (para.Code || para.Lines.Any(l => l.Leader is not null)) continue;
+
+            // A row set in parts — the bold header row of a table drawn without lines — is not a heading.
+            if (para.Lines.Any(l => l.TabStarts.Count > 0)) continue;
 
             // A bookmark pointing into this paragraph is not a guess: it names the heading and its depth.
             foreach (var (y, depth, title) in headings[pageIndex])
@@ -2689,12 +2718,13 @@ public static class ContentComposer
             double scale = horizontal ? height : width;
             var covered = new Dictionary<uint, (double Length, double Thickness)>();
 
-            var segments = page.Rules.Select(r => (r.Bounds, r.Color))
-                .Concat(page.Fills.Select(f => (f.Bounds, f.Color)));
-            foreach (var (bounds, color) in segments)
+            // A rule knows how thick it was drawn; a thin filled rectangle is as thick as it is across.
+            var segments = page.Rules.Select(r => (r.Bounds, r.Color, Weight: r.ThicknessPoints))
+                .Concat(page.Fills.Select(f => (f.Bounds, f.Color, Weight: 0.0)));
+            foreach (var (bounds, color, weight) in segments)
             {
                 if (color == fill) continue;
-                double thickness = (horizontal ? bounds.Height : bounds.Width) * scale;
+                double thickness = weight > 0 ? weight : (horizontal ? bounds.Height : bounds.Width) * scale;
                 if (thickness > Thin || thickness <= 0) continue;
                 double from = horizontal ? bounds.Top : bounds.Left, to = horizontal ? bounds.Bottom : bounds.Right;
                 if (from * scale > edge * scale + reach || to * scale < edge * scale - reach) continue;
@@ -3081,9 +3111,10 @@ public static class ContentComposer
     /// at the point it was written, and a note dropped is content lost without a word.
     /// </summary>
     private static void AttachComments(
-        List<DocxBlock> blocks, List<(Para Para, int Block)> placed, PageExtras extras, CommentSink comments)
+        List<DocxBlock> blocks, List<(Para Para, int Block)> placed, List<(RectD Bounds, int Block)> tables,
+        PageExtras extras, CommentSink comments)
     {
-        if (placed.Count == 0) return;
+        if (placed.Count == 0 && tables.Count == 0) return;
 
         foreach (var annotation in extras.Annotations)
         {
@@ -3107,12 +3138,59 @@ public static class ContentComposer
                 best = distance;
                 target = block;
             }
+
+            // A note set beside a table is about the row it stands level with, not the paragraph after it.
+            var (tableBounds, tableBlock) = tables.OrderBy(t => t.Bounds.DistanceTo(point)).FirstOrDefault(t => blocks[t.Block] is DocxTable);
+            if (tableBlock >= 0 && tables.Count > 0 && tableBounds.DistanceTo(point) < best &&
+                blocks[tableBlock] is DocxTable table && CommentOnRow(table, tableBounds, point, () => comments.Add(annotation.Author, text, null)) is { } commented)
+            {
+                blocks[tableBlock] = commented;
+                continue;
+            }
             if (target < 0) continue;
 
             int id = comments.Add(annotation.Author, text, null);
             var paragraph = (DocxParagraph)blocks[target];
             blocks[target] = paragraph with { CommentIds = [.. paragraph.CommentIds, id] };
         }
+    }
+
+    /// <summary>
+    /// Anchors a comment in the cell a point stands level with and nearest to: the row by where the point
+    /// falls down the table, measured with the rows' heights, and the cell by where it falls across.
+    /// </summary>
+    private static DocxTable? CommentOnRow(DocxTable table, RectD bounds, PointD point, Func<int> add)
+    {
+        if (table.Rows.Count == 0 || bounds.Height <= 0) return null;
+
+        double[] heights = [.. table.Rows.Select(r => Math.Max(1.0, r.MinHeightTwips))];
+        double down = Math.Clamp((point.Y - bounds.Top) / bounds.Height, 0, 0.9999) * heights.Sum();
+        int row = 0;
+        for (double edge = heights[0]; row < heights.Length - 1 && down > edge; edge += heights[++row]) { }
+
+        var cells = table.Rows[row].Cells;
+        double across = Math.Clamp((point.X - bounds.Left) / Math.Max(bounds.Width, 1e-6), 0, 0.9999) * table.ColumnWidthsTwips.Sum();
+        int cell = cells.Count - 1;
+        for (int c = 0, column = 0; c < cells.Count; column += cells[c].ColumnSpan, c++)
+        {
+            double right = table.ColumnWidthsTwips.Take(column + cells[c].ColumnSpan).Sum();
+            if (across < right) { cell = c; break; }
+        }
+
+        // A cell continuing a merge from above holds nothing; the comment goes on the nearest one that does.
+        while (cell >= 0 && !cells[cell].Blocks.OfType<DocxParagraph>().Any()) cell--;
+        if (cell < 0) return null;
+
+        var blocks = cells[cell].Blocks.ToList();
+        int index = blocks.FindIndex(b => b is DocxParagraph);
+        var paragraph = (DocxParagraph)blocks[index];
+        blocks[index] = paragraph with { CommentIds = [.. paragraph.CommentIds, add()] };
+
+        var newCells = cells.ToList();
+        newCells[cell] = cells[cell] with { Blocks = blocks };
+        var rows = table.Rows.ToList();
+        rows[row] = rows[row] with { Cells = newCells };
+        return table with { Rows = rows };
     }
 
     // ---- sections ----

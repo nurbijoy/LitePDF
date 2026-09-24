@@ -176,6 +176,53 @@ public sealed class DocxDrawingsEndToEndTests
         Assert.Equal("+12%", CellText(plain, 2, 2));
     }
 
+    [Fact]
+    public async Task A_table_drawn_with_no_lines_keeps_its_columns_as_tab_stops()
+    {
+        // Without the unruled-table guess, each row is a line set in parts: its figures at tab stops that
+        // line up down the table, not "Q3 1,442 +8% Q4 1,610 +12%" run together in one paragraph.
+        await using var document = await PdfiumDocument.OpenAsync(await DrawingSampleAsync());
+        var page = await document.GetPageContentAsync(1, RenderPriority.Background);
+
+        var rows = ContentComposer.Compose([page]).AllBlocks.OfType<DocxParagraph>()
+            .Where(p => p.Text.Contains('\t', StringComparison.Ordinal)).ToList();
+
+        Assert.Equal(4, rows.Count);
+        Assert.Equal("Q4\t1,610\t+12%", rows[2].Text);
+        Assert.All(rows, row => Assert.Equal(rows[0].TabStops, row.TabStops));
+        Assert.Equal(DocxParagraphStyle.Body, rows[0].Style);   // the bold header row is not a heading
+    }
+
+    [Fact]
+    public async Task Reads_a_stroked_rule_at_the_width_it_was_drawn()
+    {
+        // The table is ruled with 0.8 pt strokes; PDFium's bounds for them are 1.6 pt across.
+        await using var document = await PdfiumDocument.OpenAsync(await DrawingSampleAsync());
+        var page = await document.GetPageContentAsync(1, RenderPriority.Background);
+
+        Assert.All(page.Rules, rule => Assert.InRange(rule.ThicknessPoints, 0.7, 0.9));
+        var table = Assert.Single(ContentComposer.Compose([page]).AllBlocks.OfType<DocxTable>());
+        Assert.InRange(table.BorderEighths, 5, 7);
+    }
+
+    [Fact]
+    public async Task A_charts_axes_stay_in_its_picture_and_nowhere_else()
+    {
+        await using var document = await PdfiumDocument.OpenAsync(await DrawingSampleAsync());
+        var page = await document.GetPageContentAsync(0, RenderPriority.Background);
+
+        // The y-axis rises to 620 pt from the bottom, above the tallest bar: the picture takes it in whole.
+        var drawing = Assert.Single(page.Images, image => image.IsDrawing);
+        Assert.True(drawing.Bounds.Top * page.Size.Height <= 173, $"the picture starts at {drawing.Bounds.Top * page.Size.Height:0} pt");
+
+        // And the x-axis is not drawn a second time as a border on the caption under the chart.
+        Assert.All(ContentComposer.Compose([page]).AllBlocks.OfType<DocxParagraph>(), p =>
+        {
+            Assert.Null(p.BorderAbove);
+            Assert.Null(p.BorderBelow);
+        });
+    }
+
     // ---- notes ----
 
     [Fact]
@@ -192,6 +239,13 @@ public sealed class DocxDrawingsEndToEndTests
         using var package = DocxPackage.Write(composed);
         package.AssertValid();
         Assert.Contains("The figures for Q2 need a citation.", package.Xml("word/comments.xml").ToString());
+
+        // The note stands beside the table's Q2 row, so that is where Word shows it: on the row's last
+        // cell, not on whichever paragraph of the body happened to be nearest.
+        var table = Assert.Single(composed.AllBlocks.OfType<DocxTable>());
+        var commented = Assert.Single(table.Rows.SelectMany(r => r.Cells).SelectMany(c => c.Blocks).OfType<DocxParagraph>(),
+            p => p.CommentIds.Count > 0);
+        Assert.Equal("-1%", commented.Text);
     }
 
     [Fact]

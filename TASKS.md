@@ -1,5 +1,27 @@
 # TASKS
 
+## Word conversion: drawings round trip (2026-09-24)
+Reported: `sample-drawings.pdf` converted in the app, then saved from Word as PDF, did not match the original.
+Reproduced the same way (app UI → Word → Word's Save as PDF) and fixed:
+- **Stroked rules were twice their weight.** PDFium grows a stroked path's bounds by the full stroke width on
+  every side, and that was read as the thickness: every stroked table grid and rule came out doubled (the
+  sample's 0.8 pt grid as 1.5 pt). A stroked-only rule is now half as thick as its bounds.
+- **A chart's axis was drawn twice.** It is in the chart's picture, and was also made a border on the
+  caption under it. Rules inside a drawing of some size are the drawing's — unless they are part of a table
+  grid, since a sliver of a shaded header can be rasterized over a table.
+- **The chart's y-axis was cut off** above the tallest bar: the picture took in only rules within 7 pt of the
+  marks, and an axis stands off from them. An upright rule as tall as the drawing and beside it is taken in.
+- **A table drawn without lines ran together** into one line ("Q3 1,442 +8% Q4 1,610…"). A row of figures
+  has only wide gaps, and those were never tabs; they are now wherever other lines start their parts at the
+  same place, so each row is a paragraph of tab-separated columns and the bold header row is not a heading.
+- **A note beside a table** is anchored to the row it stands level with, not to the nearest body paragraph.
+- Not changed, on purpose: a PDF sticky note stays a Word comment, and Word's Save as PDF then defaults to
+  "Document showing markup", which shrinks the page to fit the comment pane. Choosing "Document" in the
+  Save as PDF options (or deleting the comment) gives the original page. Dropping the note would lose content.
+
+Verified live in Word; 250 tests; ground truth 298/298; the corpus keeps its pages and words, and the
+structure of the two reports from the morning is unchanged.
+
 ## Word conversion: structure that survives into Word (2026-09-24)
 Reported after converting `claude.pdf` and the ECL Model Development Document: "indentation, structure
 falls". Reproduced by converting both through the app's own UI and opening the result in Word; every item

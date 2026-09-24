@@ -221,6 +221,10 @@ mangled `w:tbl`.
    happens to be, or a table of short words comes out as a huddle of narrow columns in the middle of the page.
    Borders follow the PDF: a tagged table that drew no lines gets none in Word either.
 
+A row of a table drawn without lines, which has nothing but wide gaps, is set as tab-separated parts where
+its gaps line up with other lines' — even when the unruled-table guess is off. A stroked rule is half as
+thick as PDFium's bounds for it, which grow it by the full stroke width on every side.
+
 A table that carries on at the top of the next page with the same columns is joined to the one before; the
 header row printed again is dropped and the first row marked to repeat. A cell whose text sits centred in a
 taller row is centred (`w:vAlign`). Rasterized artwork lying on a table is dropped — the table draws its own
@@ -263,7 +267,9 @@ default: an embedded subset holds only the glyphs the PDF printed, so typing a n
 
 **Comments.** A PDF sticky note is a comment in everything but name, so it becomes one: `word/comments.xml`,
 `w:commentRangeStart`/`End`, and a reference run on the paragraph the note sits against — the nearest one,
-because the icon is placed beside the text rather than in it. A markup annotation carrying a note of its own
+because the icon is placed beside the text rather than in it; beside a table, the cell of the row it stands
+level with. Word's Save as PDF prints comments in a side pane by default, which scales the page down; that is
+Word's choice, made in its options, and the note is kept rather than dropped to avoid it. A markup annotation carrying a note of its own
 gets both the highlight and the comment. Left in the body a note would interrupt the text at the point it was
 written, and dropped it would be content lost without a word.
 
