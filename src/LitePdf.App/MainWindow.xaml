@@ -50,6 +50,8 @@
                     <Button Style="{StaticResource IconButton}" Content="&#xE8E5;" Click="Open_Click" ToolTip="Open (Ctrl+O)" AutomationProperties.Name="Open"/>
                     <Button Style="{StaticResource IconButton}" Content="&#xE74E;" Click="Save_Click" IsEnabled="{Binding CanSave}" ToolTip="Save (Ctrl+S)" AutomationProperties.Name="Save"/>
                     <Button Style="{StaticResource IconButton}" Content="&#xE749;" Click="Print_Click" IsEnabled="{Binding HasDocument}" ToolTip="Print (Ctrl+P)" AutomationProperties.Name="Print"/>
+                    <Button Style="{StaticResource IconButton}" Content="&#xE7A7;" Click="Undo_Click" IsEnabled="{Binding CanUndo}" ToolTip="{Binding UndoToolTip}" AutomationProperties.Name="Undo"/>
+                    <Button Style="{StaticResource IconButton}" Content="&#xE7A6;" Click="Redo_Click" IsEnabled="{Binding CanRedo}" ToolTip="{Binding RedoToolTip}" AutomationProperties.Name="Redo"/>
                     <Border Style="{StaticResource ToolbarSeparator}"/>
                     <StackPanel Orientation="Horizontal" IsEnabled="{Binding HasDocument}">
                         <RadioButton GroupName="Tool" Style="{StaticResource IconButton}" Content="&#xE8D2;" IsChecked="{Binding IsSelectTool}" ToolTip="Select text (V)" AutomationProperties.Name="Select text tool"/>
@@ -77,12 +79,12 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Right">
-                    <Button Style="{StaticResource IconButton}" Click="Highlight_Click" IsEnabled="{Binding CanAnnotate}" ToolTip="Highlight selected text (Ctrl+H)" AutomationProperties.Name="Highlight">
+                    <ToggleButton Style="{StaticResource IconButton}" Click="Highlight_Click" IsChecked="{Binding IsContinuousHighlight}" IsEnabled="{Binding CanAnnotate}" ToolTip="Highlight selected text (Ctrl+H) — toggle for continuous highlight" AutomationProperties.Name="Highlight">
                         <Grid Width="20" Height="22">
                             <TextBlock Text="&#xE7E6;" Style="{StaticResource Icon}" VerticalAlignment="Top" Margin="0,1,0,0"/>
                             <Border Height="3" CornerRadius="1.5" VerticalAlignment="Bottom" Background="{Binding HighlightBrush}"/>
                         </Grid>
-                    </Button>
+                    </ToggleButton>
                     <Button x:Name="MarkupMenuButton" Style="{StaticResource IconButton}" Width="18" Margin="-2,0,1,0" FontSize="9" Content="&#xE70D;" Click="MarkupMenu_Click"
                             IsEnabled="{Binding CanAnnotate}" ToolTip="Highlight color, underline, strikethrough and notes" AutomationProperties.Name="Markup options"/>
                     <Button x:Name="OcrMenuButton" Style="{StaticResource ToolbarButton}" Click="OcrMenu_Click" IsEnabled="{Binding HasDocument}" ToolTip="Recognize text in scanned pages and images" AutomationProperties.Name="Recognize text">
@@ -405,7 +407,7 @@
 
                         <TextBlock Text="Keyboard" Style="{StaticResource SectionTitle}" Margin="0,36,0,8"/>
                         <TextBlock Style="{StaticResource Caption}" LineHeight="22" TextWrapping="Wrap">
-                            Ctrl+O open · Ctrl+F search · Ctrl+C copy · Ctrl+H highlight · Ctrl+S save<LineBreak/>
+                            Ctrl+O open · Ctrl+F search · Ctrl+C copy · Ctrl+H highlight · Ctrl+S save · Ctrl+Z undo · Ctrl+Y redo<LineBreak/>
                             Ctrl+wheel zoom · Ctrl+1 fit width · Ctrl+2 fit page · F4 sidebar · F11 full screen
                         </TextBlock>
                     </StackPanel>
@@ -451,7 +453,13 @@
                 <!-- Busy overlay -->
                 <Grid Background="#33000000" Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisibility}}">
                     <Border Style="{StaticResource Card}" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="24,18">
-                        <TextBlock Text="{Binding BusyText}" FontWeight="SemiBold"/>
+                        <StackPanel MinWidth="220">
+                            <TextBlock Text="{Binding BusyText}" FontWeight="SemiBold"/>
+                            <StackPanel Visibility="{Binding HasBusyProgress, Converter={StaticResource BoolToVisibility}}" Margin="0,10,0,0">
+                                <ProgressBar Height="4" Maximum="1" Value="{Binding BusyProgress}"/>
+                                <TextBlock Text="{Binding BusyProgressText}" Style="{StaticResource Caption}" HorizontalAlignment="Right" Margin="0,6,0,0"/>
+                            </StackPanel>
+                        </StackPanel>
                     </Border>
                 </Grid>
             </Grid>

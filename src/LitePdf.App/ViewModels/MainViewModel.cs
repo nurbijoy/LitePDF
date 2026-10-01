@@ -50,6 +50,14 @@ public sealed class MainViewModel : ObservableObject
     private bool _isToastVisible;
     private bool _isBusy;
     private string _busyText = "";
+    private double _busyProgress;
+    private string _busyProgressText = "";
+    private bool _hasBusyProgress;
+    private bool _canUndo;
+    private bool _canRedo;
+    private string _undoToolTip = "Undo (Ctrl+Z)";
+    private string _redoToolTip = "Redo (Ctrl+Y)";
+    private bool _isContinuousHighlight;
     private ViewerTool _tool = ViewerTool.Select;
     private AnnotationColor _highlightColor = AnnotationColor.Yellow;
     private string _textSourceText = "";
@@ -231,12 +239,39 @@ public sealed class MainViewModel : ObservableObject
 
     public string BusyText { get => _busyText; set => Set(ref _busyText, value); }
 
+    public double BusyProgress { get => _busyProgress; set => Set(ref _busyProgress, value); }
+
+    public string BusyProgressText { get => _busyProgressText; set => Set(ref _busyProgressText, value); }
+
+    public bool HasBusyProgress { get => _hasBusyProgress; set => Set(ref _hasBusyProgress, value); }
+
+    public bool CanUndo { get => _canUndo; set => Set(ref _canUndo, value); }
+
+    public bool CanRedo { get => _canRedo; set => Set(ref _canRedo, value); }
+
+    public string UndoToolTip { get => _undoToolTip; set => Set(ref _undoToolTip, value); }
+
+    public string RedoToolTip { get => _redoToolTip; set => Set(ref _redoToolTip, value); }
+
+    public bool IsContinuousHighlight
+    {
+        get => _isContinuousHighlight;
+        set
+        {
+            if (Set(ref _isContinuousHighlight, value) && value && Tool != ViewerTool.Select)
+            {
+                Tool = ViewerTool.Select;
+            }
+        }
+    }
+
     public ViewerTool Tool
     {
         get => _tool;
         set
         {
             if (!Set(ref _tool, value)) return;
+            if (value != ViewerTool.Select) IsContinuousHighlight = false;
             OnPropertyChanged(nameof(IsSelectTool));
             OnPropertyChanged(nameof(IsHandTool));
             OnPropertyChanged(nameof(IsRegionTool));

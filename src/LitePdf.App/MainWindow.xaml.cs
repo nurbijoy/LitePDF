@@ -88,6 +88,8 @@ public partial class MainWindow : Window
             if (page == Viewer.CurrentPageIndex) Run(UpdateScanBannerAsync);
         };
         Viewer.DeleteRequested += () => Run(DeleteSelectedAnnotationAsync);
+        Viewer.ContinuousHighlightTriggered += OnContinuousHighlightTriggered;
+        Viewer.ContinuousHighlightChanged += v => { if (_vm.IsContinuousHighlight != v) _vm.IsContinuousHighlight = v; };
     }
 
     private void OnCurrentPageChanged()
@@ -121,6 +123,13 @@ public partial class MainWindow : Window
                 break;
             case nameof(MainViewModel.Tool):
                 Viewer.Tool = _vm.Tool;
+                if (_vm.Tool != ViewerTool.Select && _vm.IsContinuousHighlight)
+                    _vm.IsContinuousHighlight = false;
+                break;
+            case nameof(MainViewModel.IsContinuousHighlight):
+                Viewer.IsContinuousHighlight = _vm.IsContinuousHighlight;
+                if (_vm.IsContinuousHighlight && _vm.Tool != ViewerTool.Select)
+                    _vm.Tool = ViewerTool.Select;
                 break;
             case nameof(MainViewModel.SearchQuery):
                 _searchDebounce.Stop();
@@ -160,6 +169,13 @@ public partial class MainWindow : Window
                 case Key.B when hasDocument: Handle(() => _vm.IsSidebarOpen = !_vm.IsSidebarOpen); return;
                 case Key.D when hasDocument: Handle(() => Run(ShowPropertiesAsync)); return;
                 case Key.V when !inTextInput: Handle(() => Run(PasteImageAsync)); return;
+                case Key.Z when !inTextInput:
+                    if (shift) Handle(() => Run(RedoAsync));
+                    else Handle(() => Run(UndoAsync));
+                    return;
+                case Key.Y when !inTextInput:
+                    Handle(() => Run(RedoAsync));
+                    return;
                 case Key.Tab when _vm.Tabs.Count > 1: Handle(() => SwitchTab(shift ? -1 : 1)); return;
             }
 
@@ -168,7 +184,10 @@ public partial class MainWindow : Window
                 switch (key)
                 {
                     case Key.C when Viewer.Selection is not null: Handle(() => Run(CopySelectionAsync)); return;
-                    case Key.H: Handle(() => Run(() => MarkSelectionAsync(AnnotationKind.Highlight))); return;
+                    case Key.H:
+                        if (Viewer.Selection is not null) Handle(() => Run(() => MarkSelectionAsync(AnnotationKind.Highlight)));
+                        else Handle(ToggleContinuousHighlight);
+                        return;
                     case Key.U: Handle(() => Run(() => MarkSelectionAsync(AnnotationKind.Underline))); return;
                     case Key.R: Handle(() => RotateView(shift ? -1 : 1)); return;
                     case Key.OemPlus or Key.Add: Handle(Viewer.ZoomIn); return;
@@ -188,6 +207,7 @@ public partial class MainWindow : Window
             case Key.F3 when hasDocument: Handle(() => MoveToHit(shift ? -1 : 1)); return;
             case Key.F4 when hasDocument && !shift: Handle(() => _vm.IsSidebarOpen = !_vm.IsSidebarOpen); return;
             case Key.F11 when hasDocument && !shift: Handle(ToggleFullScreen); return;
+            case Key.Escape when _vm.IsContinuousHighlight: Handle(ToggleContinuousHighlight); return;
             case Key.Escape when _vm.IsFullScreen: Handle(ToggleFullScreen); return;
         }
 
@@ -207,13 +227,33 @@ public partial class MainWindow : Window
     private void Open_Click(object sender, RoutedEventArgs e) => Run(OpenFileDialogAsync);
     private void Save_Click(object sender, RoutedEventArgs e) => Run(() => SaveAsync(saveAs: false));
     private void Print_Click(object sender, RoutedEventArgs e) => Run(PrintAsync);
+    private void Undo_Click(object sender, RoutedEventArgs e) => Run(UndoAsync);
+    private void Redo_Click(object sender, RoutedEventArgs e) => Run(RedoAsync);
     private void PreviousPage_Click(object sender, RoutedEventArgs e) => Viewer.GoToPage(Viewer.CurrentPageIndex - (Viewer.Layout?.PagesPerRow ?? 1));
     private void NextPage_Click(object sender, RoutedEventArgs e) => Viewer.GoToPage(Viewer.CurrentPageIndex + (Viewer.Layout?.PagesPerRow ?? 1));
     private void ZoomIn_Click(object sender, RoutedEventArgs e) => Viewer.ZoomIn();
     private void ZoomOut_Click(object sender, RoutedEventArgs e) => Viewer.ZoomOut();
     private void Search_Click(object sender, RoutedEventArgs e) => ShowSearch();
     private void Settings_Click(object sender, RoutedEventArgs e) => ShowSettings();
-    private void Highlight_Click(object sender, RoutedEventArgs e) => Run(() => MarkSelectionAsync(AnnotationKind.Highlight));
+    private void Highlight_Click(object sender, RoutedEventArgs e)
+    {
+        if (Viewer.Selection is not null)
+            Run(() => MarkSelectionAsync(AnnotationKind.Highlight));
+        else if (sender is not ToggleButton)
+            ToggleContinuousHighlight();
+        else
+            ShowToast(_vm.IsContinuousHighlight
+                ? "Continuous highlight active — select text to highlight (Esc to stop)"
+                : "Continuous highlight off");
+    }
+
+    private void ToggleContinuousHighlight()
+    {
+        _vm.IsContinuousHighlight = !_vm.IsContinuousHighlight;
+        ShowToast(_vm.IsContinuousHighlight
+            ? "Continuous highlight active — select text to highlight (Esc to stop)"
+            : "Continuous highlight off");
+    }
 
     private void PageBox_KeyDown(object sender, KeyEventArgs e)
     {
@@ -257,7 +297,11 @@ public partial class MainWindow : Window
 
     private void MarkupMenu_Click(object sender, RoutedEventArgs e)
     {
-        var items = new List<object?>();
+        var items = new List<object?>
+        {
+            MenuItemFor("Continuous highlight", Icons.Highlight, ToggleContinuousHighlight, isChecked: _vm.IsContinuousHighlight),
+            null,
+        };
         foreach (var (name, color) in AnnotationColor.Palette)
             items.Add(MenuItemFor(name, null, () => { _vm.HighlightColor = color; Run(() => MarkSelectionAsync(AnnotationKind.Highlight, onlyIfSelection: true)); },
                 isChecked: _vm.HighlightColor == color, iconElement: ColorSwatch(color)));
@@ -293,6 +337,9 @@ public partial class MainWindow : Window
 
         var items = new List<object?>
         {
+            MenuItemFor("Undo", Icons.Undo, () => Run(UndoAsync), "Ctrl+Z", isEnabled: _vm.CanUndo),
+            MenuItemFor("Redo", Icons.Redo, () => Run(RedoAsync), "Ctrl+Y", isEnabled: _vm.CanRedo),
+            null,
             MenuItemFor("Save as…", Icons.SaveAs, () => Run(() => SaveAsync(saveAs: true)), "Ctrl+Shift+S", _session?.IsPdf == true),
             MenuItemFor("Convert to Word…", Icons.Document, () => Run(ExportDocxAsync), null, _session?.IsPdf == true),
             MenuItemFor("Export annotations…", Icons.Export, () => Run(ExportAnnotationsAsync), null, _session?.CanAnnotate == true),

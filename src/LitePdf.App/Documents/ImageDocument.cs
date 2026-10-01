@@ -106,10 +106,10 @@ public sealed class ImageDocument : IPdfDocument
     public Task<IReadOnlyList<PdfAnnotation>> GetAnnotationsAsync(int pageIndex, int priority, CancellationToken ct = default) =>
         Task.FromResult<IReadOnlyList<PdfAnnotation>>([]);
 
-    public Task AddMarkupAsync(int pageIndex, AnnotationKind kind, IReadOnlyList<RectD> lineRects, AnnotationColor color, CancellationToken ct = default) =>
+    public Task<PdfAnnotation> AddMarkupAsync(int pageIndex, AnnotationKind kind, IReadOnlyList<RectD> lineRects, AnnotationColor color, CancellationToken ct = default) =>
         throw new NotSupportedException("Images cannot be annotated.");
 
-    public Task AddNoteAsync(int pageIndex, PointD position, string contents, AnnotationColor color, CancellationToken ct = default) =>
+    public Task<PdfAnnotation> AddNoteAsync(int pageIndex, PointD position, string contents, AnnotationColor color, CancellationToken ct = default) =>
         throw new NotSupportedException("Images cannot be annotated.");
 
     public Task SetAnnotationColorAsync(int pageIndex, int annotationIndex, AnnotationColor color, CancellationToken ct = default) =>
@@ -121,7 +121,7 @@ public sealed class ImageDocument : IPdfDocument
     public Task RemoveAnnotationAsync(int pageIndex, int annotationIndex, CancellationToken ct = default) =>
         throw new NotSupportedException();
 
-    public Task SaveCopyAsync(string path, CancellationToken ct = default) =>
+    public Task SaveCopyAsync(string path, IProgress<double>? progress = null, CancellationToken ct = default) =>
         throw new NotSupportedException("Images cannot be saved as PDF.");
 
     public Task<DocumentInfo> GetInfoAsync(CancellationToken ct = default)

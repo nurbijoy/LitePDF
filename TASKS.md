@@ -1,5 +1,21 @@
 # TASKS
 
+## Annotation Undo/Redo, Save progress bar, Continuous highlight (2026-10-01)
+Added interactive annotation productivity features and visual save progress feedback:
+- **Undo/Redo for annotation operations (`UndoManager`).** Full multi-step undo and redo support for markup annotations
+  (highlight, underline, strikethrough), notes, annotation deletions, color changes, and note content edits. Supports
+  `Ctrl+Z`, `Ctrl+Y`, `Ctrl+Shift+Z`, dedicated CommandBar buttons with tooltips, viewer context menu items, and More menu items.
+  Undo/Redo stacks are tracked per document tab.
+- **Save progress bar.** `FPDF_SaveAsCopy` writer callback streams progress via `IProgress<double>` in `FileWriteBridge`,
+  wired through `IPdfDocument.SaveCopyAsync` and `DocumentSession.SaveAsync`. The Busy overlay shows an animated `ProgressBar`
+  and real-time percentage text during file saves.
+- **Continuous highlight mode (like WPS Office).** Clicking the Highlight tool button or pressing `Ctrl+H` (with no selection)
+  toggles continuous highlighting. When active, cursor displays as a pen (`Cursors.Pen`), and text selection automatically
+  applies the active highlight color upon mouse release. Users can cancel at any time via `Esc`, switching tools, or toggling
+  the button/menu.
+
+Verified: `dotnet build` 0 warnings; 251 tests (all pass, including new `SaveCopyAsync` progress reporting and annotation return tests); `--self-test` passed.
+
 ## Word conversion: drawings round trip (2026-09-24)
 Reported: `sample-drawings.pdf` converted in the app, then saved from Word as PDF, did not match the original.
 Reproduced the same way (app UI → Word → Word's Save as PDF) and fixed:

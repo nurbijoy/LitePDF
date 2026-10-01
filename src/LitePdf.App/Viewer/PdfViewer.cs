@@ -115,6 +115,20 @@ public sealed class PdfViewer : Border
         }
     }
 
+    private bool _isContinuousHighlight;
+    public bool IsContinuousHighlight
+    {
+        get => _isContinuousHighlight;
+        set
+        {
+            if (_isContinuousHighlight == value) return;
+            _isContinuousHighlight = value;
+            ContinuousHighlightChanged?.Invoke(value);
+            UpdateHover(Mouse.GetPosition(this));
+        }
+    }
+    public event Action<bool>? ContinuousHighlightChanged;
+
     public event Action? CurrentPageChanged;
     public event Action? ZoomChanged;
     public event Action? SelectionChanged;
@@ -126,6 +140,7 @@ public sealed class PdfViewer : Border
     public event Action<PdfAnnotation>? NoteActivated;
     public event Action<int, PageText>? PageTextLoaded;
     public event Action? DeleteRequested;
+    public event Action<TextRange>? ContinuousHighlightTriggered;
 
     // ---- Document lifetime ----
 
@@ -703,6 +718,12 @@ public sealed class PdfViewer : Border
                 }
                 break;
         }
+
+        if (IsContinuousHighlight && Selection is { IsEmpty: false } range)
+        {
+            ContinuousHighlightTriggered?.Invoke(range);
+        }
+
         UpdateHover(e.GetPosition(_panel));
     }
 
@@ -739,7 +760,14 @@ public sealed class PdfViewer : Border
         {
             link = FindLink(hit);
             if (link is not null || FindAnnotation(hit) is not null) cursor = Cursors.Hand;
-            else if (Session?.TryGetCachedText(hit.PageIndex) is { } text && text.HitTest(hit.Point, hit.Tolerance) >= 0) cursor = Cursors.IBeam;
+            else if (Session?.TryGetCachedText(hit.PageIndex) is { } text && text.HitTest(hit.Point, hit.Tolerance) >= 0)
+                cursor = IsContinuousHighlight ? Cursors.Pen : Cursors.IBeam;
+            else if (IsContinuousHighlight)
+                cursor = Cursors.Pen;
+        }
+        else if (Tool == ViewerTool.Select && IsContinuousHighlight)
+        {
+            cursor = Cursors.Pen;
         }
         if (!ReferenceEquals(_panel.Cursor, cursor)) _panel.Cursor = cursor;
         if (!Equals(link, _hoverLink))
@@ -789,6 +817,11 @@ public sealed class PdfViewer : Border
                 await SelectAllOnCurrentPageAsync();
                 break;
             case Key.Escape:
+                if (IsContinuousHighlight)
+                {
+                    e.Handled = true;
+                    IsContinuousHighlight = false;
+                }
                 if (Selection is not null || SelectedAnnotation is not null || RegionDraft is not null)
                 {
                     e.Handled = true;

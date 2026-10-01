@@ -59,18 +59,30 @@ public partial class MainWindow
             if (!onlyIfSelection) ShowToast("Select some text first");
             return;
         }
-        int pages = await session.AddMarkupAsync(range, kind, color ?? _vm.HighlightColor);
-        if (pages == 0)
+        var targetColor = color ?? _vm.HighlightColor;
+        var created = await session.AddMarkupAsync(range, kind, targetColor);
+        if (created.Count == 0)
         {
-            ShowToast("There's no text in the selection to mark");
+            if (!onlyIfSelection) ShowToast("There's no text in the selection to mark");
             return;
         }
+        _activeTab?.UndoManager.Push(new AddMarkupAction(created, kind, targetColor));
+        UpdateUndoRedoState();
         Viewer.ClearSelection();
         ShowToast(kind switch
         {
             AnnotationKind.Underline => "Underlined",
-            AnnotationKind.StrikeOut => "Struck through",
+            AnnotationKind.StrikeOut => "Strikethrough",
             _ => "Highlighted",
+        });
+    }
+
+    private void OnContinuousHighlightTriggered(TextRange range)
+    {
+        if (!_vm.CanAnnotate || _session is null) return;
+        Run(async () =>
+        {
+            await MarkSelectionAsync(AnnotationKind.Highlight, _vm.HighlightColor, onlyIfSelection: true);
         });
     }
 
@@ -93,7 +105,9 @@ public partial class MainWindow
         if (_session is not { CanAnnotate: true } session) return;
         string? text = TextInputDialog.Prompt(this, "Add note", null, "", "Add note", multiline: true, allowDelete: false, out _);
         if (string.IsNullOrWhiteSpace(text)) return;
-        await session.AddNoteAsync(page, position, text.Trim(), AnnotationColor.Yellow);
+        var created = await session.AddNoteAsync(page, position, text.Trim(), AnnotationColor.Yellow);
+        _activeTab?.UndoManager.Push(new AddNoteAction(created, page, position, text.Trim(), AnnotationColor.Yellow));
+        UpdateUndoRedoState();
         ShowToast("Note added");
     }
 
@@ -103,7 +117,13 @@ public partial class MainWindow
         string? text = TextInputDialog.Prompt(this, "Note", null, note.Contents, "Save", multiline: true, allowDelete: true, out bool deleted);
         if (text is null) return;
         if (deleted) await DeleteAnnotationAsync(note);
-        else if (text != note.Contents) await session.SetAnnotationContentsAsync(note, text);
+        else if (text != note.Contents)
+        {
+            string oldText = note.Contents;
+            await session.SetAnnotationContentsAsync(note, text);
+            _activeTab?.UndoManager.Push(new EditNoteAction(note, oldText, text));
+            UpdateUndoRedoState();
+        }
     }
 
     private Task DeleteSelectedAnnotationAsync() =>
@@ -113,15 +133,73 @@ public partial class MainWindow
     {
         if (_session is not { CanAnnotate: true } session) return;
         await session.RemoveAnnotationAsync(annotation);
+        _activeTab?.UndoManager.Push(new DeleteAnnotationAction(annotation));
+        UpdateUndoRedoState();
         Viewer.SetSelectedAnnotation(null);
         ShowToast(annotation.Kind == AnnotationKind.Note ? "Note deleted" : "Annotation deleted");
     }
 
-    private System.Windows.Controls.MenuItem ColorMenu(string header, Action<AnnotationColor> apply, AnnotationColor? current)
+    private async Task UndoAsync()
+    {
+        if (_activeTab is not { } tab || _session is not { } session) return;
+        if (!tab.UndoManager.CanUndo) return;
+        string? desc = await tab.UndoManager.UndoAsync(session);
+        Viewer.SetSelectedAnnotation(null);
+        ShowToast(desc is not null ? $"Undo: {desc}" : "Undone");
+        UpdateUndoRedoState();
+        if (_vm.SelectedPanel == SidebarPanel.Annotations && _vm.IsSidebarOpen) RefreshAnnotations();
+    }
+
+    private async Task RedoAsync()
+    {
+        if (_activeTab is not { } tab || _session is not { } session) return;
+        if (!tab.UndoManager.CanRedo) return;
+        string? desc = await tab.UndoManager.RedoAsync(session);
+        Viewer.SetSelectedAnnotation(null);
+        ShowToast(desc is not null ? $"Redo: {desc}" : "Redone");
+        UpdateUndoRedoState();
+        if (_vm.SelectedPanel == SidebarPanel.Annotations && _vm.IsSidebarOpen) RefreshAnnotations();
+    }
+
+    public void UpdateUndoRedoState()
+    {
+        if (_activeTab is { } tab)
+        {
+            _vm.CanUndo = tab.UndoManager.CanUndo;
+            _vm.CanRedo = tab.UndoManager.CanRedo;
+            _vm.UndoToolTip = tab.UndoManager.CanUndo ? $"Undo {tab.UndoManager.NextUndoDescription} (Ctrl+Z)" : "Undo (Ctrl+Z)";
+            _vm.RedoToolTip = tab.UndoManager.CanRedo ? $"Redo {tab.UndoManager.NextRedoDescription} (Ctrl+Y)" : "Redo (Ctrl+Y)";
+        }
+        else
+        {
+            _vm.CanUndo = false;
+            _vm.CanRedo = false;
+            _vm.UndoToolTip = "Undo (Ctrl+Z)";
+            _vm.RedoToolTip = "Redo (Ctrl+Y)";
+        }
+    }
+
+    private System.Windows.Controls.MenuItem ColorMenu(string header, Action<AnnotationColor> apply, AnnotationColor? current, PdfAnnotation? targetAnnotation = null)
     {
         var menu = new System.Windows.Controls.MenuItem { Header = header, Icon = IconText(Icons.Highlight) };
         foreach (var (name, color) in AnnotationColor.Palette)
-            menu.Items.Add(MenuItemFor(name, null, () => apply(color), isChecked: current == color, iconElement: ColorSwatch(color)));
+            menu.Items.Add(MenuItemFor(name, null, () =>
+            {
+                if (targetAnnotation is not null && _session is not null && current != color)
+                {
+                    var oldColor = current ?? AnnotationColor.Yellow;
+                    Run(async () =>
+                    {
+                        await _session.SetAnnotationColorAsync(targetAnnotation, color);
+                        _activeTab?.UndoManager.Push(new ChangeColorAction(targetAnnotation, oldColor, color));
+                        UpdateUndoRedoState();
+                    });
+                }
+                else
+                {
+                    apply(color);
+                }
+            }, isChecked: current == color, iconElement: ColorSwatch(color)));
         return menu;
     }
 
@@ -130,6 +208,13 @@ public partial class MainWindow
         if (_session is not { } session) return;
         var items = new List<object?>();
         int page = context.PageIndex;
+
+        if (_activeTab?.UndoManager.CanUndo == true)
+            items.Add(MenuItemFor($"Undo {_activeTab.UndoManager.NextUndoDescription}", Icons.Undo, () => Run(UndoAsync), "Ctrl+Z"));
+        if (_activeTab?.UndoManager.CanRedo == true)
+            items.Add(MenuItemFor($"Redo {_activeTab.UndoManager.NextRedoDescription}", Icons.Redo, () => Run(RedoAsync), "Ctrl+Y"));
+        if (_activeTab?.UndoManager.CanUndo == true || _activeTab?.UndoManager.CanRedo == true)
+            items.Add(null);
 
         if (context.HasSelection)
         {
@@ -149,7 +234,7 @@ public partial class MainWindow
         if (context.Annotation is { } annotation)
         {
             if (annotation.Kind == AnnotationKind.Note) items.Add(MenuItemFor("Edit note…", Icons.Note, () => Run(() => EditNoteAsync(annotation))));
-            items.Add(ColorMenu("Change color", c => Run(() => session.SetAnnotationColorAsync(annotation, c)), annotation.Color));
+            items.Add(ColorMenu("Change color", c => Run(() => session.SetAnnotationColorAsync(annotation, c)), annotation.Color, annotation));
             items.Add(MenuItemFor("Delete annotation", Icons.Delete, () => Run(() => DeleteAnnotationAsync(annotation)), "Del"));
             items.Add(null);
         }

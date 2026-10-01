@@ -313,4 +313,6 @@ public static class Icons
     public const string Underline = "";
     public const string Link = "";
     public const string Export = "";
+    public const string Undo = "\uE7A7";
+    public const string Redo = "\uE7A6";
 }

@@ -211,32 +211,81 @@ public sealed class DocumentSession : IAsyncDisposable
         return annotations;
     }
 
-    /// <summary>Adds a markup annotation over the text range. Returns the number of pages changed.</summary>
-    public async Task<int> AddMarkupAsync(TextRange range, AnnotationKind kind, AnnotationColor color)
+    /// <summary>Adds a markup annotation over the text range. Returns the list of created annotations.</summary>
+    public async Task<IReadOnlyList<PdfAnnotation>> AddMarkupAsync(TextRange range, AnnotationKind kind, AnnotationColor color)
     {
         EnsureCanAnnotate();
-        int changed = 0;
+        var created = new List<PdfAnnotation>();
         for (int page = range.Start.PageIndex; page <= range.End.PageIndex; page++)
         {
             var text = await GetTextAsync(page, RenderPriority.Interactive);
             if (range.GetPageSpan(page, text.Length) is not { } span) continue;
             var rects = text.GetRangeRects(span.Start, span.End);
             if (rects.Count == 0) continue;
-            await Document.AddMarkupAsync(page, kind, rects, color);
+            var annot = await Document.AddMarkupAsync(page, kind, rects, color);
             Invalidate(page);
-            changed++;
+            created.Add(annot);
         }
-        if (changed > 0) MarkDirty();
-        return changed;
+        if (created.Count > 0) MarkDirty();
+        return created;
     }
 
-    public async Task AddNoteAsync(int pageIndex, PointD position, string contents, AnnotationColor color)
+    public async Task<PdfAnnotation> AddMarkupToPageAsync(int pageIndex, AnnotationKind kind, IReadOnlyList<RectD> lineRects, AnnotationColor color)
     {
         EnsureCanAnnotate();
-        await Document.AddNoteAsync(pageIndex, position, contents, color);
+        var annot = await Document.AddMarkupAsync(pageIndex, kind, lineRects, color);
         Invalidate(pageIndex);
         MarkDirty();
+        return annot;
     }
+
+    public async Task<PdfAnnotation> AddNoteAsync(int pageIndex, PointD position, string contents, AnnotationColor color)
+    {
+        EnsureCanAnnotate();
+        var annot = await Document.AddNoteAsync(pageIndex, position, contents, color);
+        Invalidate(pageIndex);
+        MarkDirty();
+        return annot;
+    }
+
+    public async Task<PdfAnnotation?> FindMatchingAnnotationAsync(PdfAnnotation target)
+    {
+        if (!CanAnnotate) return null;
+        var list = await Document.GetAnnotationsAsync(target.PageIndex, RenderPriority.Interactive);
+        if (target.Index >= 0 && target.Index < list.Count)
+        {
+            var candidate = list[target.Index];
+            if (candidate.Kind == target.Kind && IsBoundsClose(candidate.Bounds, target.Bounds))
+                return candidate;
+        }
+        return list
+            .Where(a => a.Kind == target.Kind)
+            .OrderBy(a => BoundsDistance(a.Bounds, target.Bounds))
+            .FirstOrDefault(a => IsBoundsClose(a.Bounds, target.Bounds));
+    }
+
+    public async Task<bool> RemoveMatchingAnnotationAsync(PdfAnnotation target)
+    {
+        if (!CanAnnotate) return false;
+        var match = await FindMatchingAnnotationAsync(target);
+        if (match is not null)
+        {
+            await Document.RemoveAnnotationAsync(match.PageIndex, match.Index);
+            Invalidate(match.PageIndex);
+            MarkDirty();
+            return true;
+        }
+        return false;
+    }
+
+    private static bool IsBoundsClose(RectD a, RectD b) =>
+        Math.Abs(a.Left - b.Left) < 0.05 &&
+        Math.Abs(a.Top - b.Top) < 0.05 &&
+        Math.Abs(a.Width - b.Width) < 0.05 &&
+        Math.Abs(a.Height - b.Height) < 0.05;
+
+    private static double BoundsDistance(RectD a, RectD b) =>
+        Math.Abs(a.Left - b.Left) + Math.Abs(a.Top - b.Top) + Math.Abs(a.Right - b.Right) + Math.Abs(a.Bottom - b.Bottom);
 
     public async Task SetAnnotationColorAsync(PdfAnnotation annotation, AnnotationColor color)
     {
@@ -268,7 +317,7 @@ public sealed class DocumentSession : IAsyncDisposable
     /// Saves changes to <paramref name="targetPath"/> (or the current file). Data is written to a temporary file in the
     /// target folder first and then swapped in, so a failure never corrupts the original.
     /// </summary>
-    public async Task SaveAsync(string? targetPath = null)
+    public async Task SaveAsync(string? targetPath = null, IProgress<double>? progress = null)
     {
         if (!IsPdf) throw new NotSupportedException("Only PDF documents can be saved.");
         string target = Path.GetFullPath(targetPath ?? FilePath);
@@ -277,7 +326,7 @@ public sealed class DocumentSession : IAsyncDisposable
 
         try
         {
-            await Document.SaveCopyAsync(temp);
+            await Document.SaveCopyAsync(temp, progress);
         }
         catch
         {

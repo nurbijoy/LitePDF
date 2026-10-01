@@ -395,7 +395,7 @@ public sealed unsafe partial class PdfiumDocument : IPdfDocument, IPageContentSo
         return ok ? new AnnotationColor((byte)r, (byte)g, (byte)b) : null;
     }
 
-    public Task AddMarkupAsync(int pageIndex, AnnotationKind kind, IReadOnlyList<RectD> lineRects, AnnotationColor color, CancellationToken ct = default)
+    public Task<PdfAnnotation> AddMarkupAsync(int pageIndex, AnnotationKind kind, IReadOnlyList<RectD> lineRects, AnnotationColor color, CancellationToken ct = default)
     {
         int subtype = kind switch
         {
@@ -436,7 +436,13 @@ public sealed unsafe partial class PdfiumDocument : IPdfDocument, IPageContentSo
                 FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, color.R, color.G, color.B, 255);
                 FPDFAnnot_SetFlags(annot, FPDF_ANNOT_FLAG_PRINT);
                 SetAuthorAndDate(annot);
-                return true;
+
+                int index = FPDFPage_GetAnnotCount(page) - 1;
+                var unionNormalized = lineRects.Aggregate(RectD.Empty, (a, b) => a.Union(b));
+                return new PdfAnnotation(pageIndex, index, kind, unionNormalized, lineRects, color, "")
+                {
+                    Author = Environment.UserName,
+                };
             }
             finally
             {
@@ -445,7 +451,7 @@ public sealed unsafe partial class PdfiumDocument : IPdfDocument, IPageContentSo
         }), RenderPriority.Interactive, ct);
     }
 
-    public Task AddNoteAsync(int pageIndex, PointD position, string contents, AnnotationColor color, CancellationToken ct = default) =>
+    public Task<PdfAnnotation> AddNoteAsync(int pageIndex, PointD position, string contents, AnnotationColor color, CancellationToken ct = default) =>
         _worker.RunAsync(() => WithPage(pageIndex, page =>
         {
             var frame = GetFrame(pageIndex, page);
@@ -467,7 +473,13 @@ public sealed unsafe partial class PdfiumDocument : IPdfDocument, IPageContentSo
                 FPDFAnnot_SetFlags(annot, FPDF_ANNOT_FLAG_PRINT);
                 SetString(annot, "Contents", contents);
                 SetAuthorAndDate(annot);
-                return true;
+
+                int index = FPDFPage_GetAnnotCount(page) - 1;
+                var bounds = new RectD(position.X, position.Y, Math.Min(1, position.X + 0.04), Math.Min(1, position.Y + 0.04));
+                return new PdfAnnotation(pageIndex, index, AnnotationKind.Note, bounds, [], color, contents)
+                {
+                    Author = Environment.UserName,
+                };
             }
             finally
             {
@@ -516,28 +528,31 @@ public sealed unsafe partial class PdfiumDocument : IPdfDocument, IPageContentSo
             }
         }), RenderPriority.Interactive, ct);
 
-    public Task SaveCopyAsync(string path, CancellationToken ct = default)
+    public Task SaveCopyAsync(string path, IProgress<double>? progress = null, CancellationToken ct = default)
     {
         string target = Path.GetFullPath(path);
         if (string.Equals(target, FilePath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Save to a temporary file first; the open file cannot be overwritten directly.");
 
+        long expectedLength = _file.Length;
         return _worker.RunAsync(() =>
         {
             EnsureOpen();
             using var stream = new FileStream(target, FileMode.Create, FileAccess.Write, FileShare.None);
-            using (var writer = new FileWriteBridge(stream))
+            using (var writer = new FileWriteBridge(stream, progress, expectedLength))
             {
                 // Incremental saves append changes and keep the original bytes (and signatures) intact.
                 bool ok = FPDF_SaveAsCopy(_document, writer.Context, FPDF_INCREMENTAL) != 0 && writer.Error is null;
                 if (!ok)
                 {
                     stream.SetLength(0);
+                    writer.Reset();
                     ok = FPDF_SaveAsCopy(_document, writer.Context, FPDF_NO_INCREMENTAL) != 0 && writer.Error is null;
                 }
                 if (!ok) throw new IOException("The document could not be written.", writer.Error);
             }
             stream.Flush(flushToDisk: true);
+            progress?.Report(1.0);
         }, RenderPriority.Interactive, ct);
     }
 

@@ -71,11 +71,16 @@ internal sealed unsafe class FileAccessBridge : IDisposable
 internal sealed unsafe class FileWriteBridge : IDisposable
 {
     private readonly Stream _stream;
+    private readonly IProgress<double>? _progress;
+    private readonly long _expectedLength;
+    private long _bytesWritten;
     private GCHandle _handle;
 
-    public FileWriteBridge(Stream stream)
+    public FileWriteBridge(Stream stream, IProgress<double>? progress = null, long expectedLength = 0)
     {
         _stream = stream;
+        _progress = progress;
+        _expectedLength = expectedLength;
         _handle = GCHandle.Alloc(this);
         Context = (FileWriteContext*)NativeMemory.AllocZeroed((nuint)sizeof(FileWriteContext));
         Context->Version = 1;
@@ -87,6 +92,12 @@ internal sealed unsafe class FileWriteBridge : IDisposable
 
     public Exception? Error { get; private set; }
 
+    public void Reset()
+    {
+        _bytesWritten = 0;
+        Error = null;
+    }
+
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     private static int WriteBlock(FileWriteContext* context, byte* data, uint size)
     {
@@ -96,6 +107,12 @@ internal sealed unsafe class FileWriteBridge : IDisposable
             bridge = GCHandle.FromIntPtr(context->Handle).Target as FileWriteBridge;
             if (bridge is null) return 0;
             bridge._stream.Write(new ReadOnlySpan<byte>(data, checked((int)size)));
+            bridge._bytesWritten += size;
+            if (bridge._progress is not null && bridge._expectedLength > 0)
+            {
+                double fraction = Math.Clamp((double)bridge._bytesWritten / bridge._expectedLength, 0.05, 0.95);
+                bridge._progress.Report(fraction);
+            }
             return 1;
         }
         catch (Exception ex)

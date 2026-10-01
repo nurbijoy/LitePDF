@@ -49,6 +49,8 @@ public sealed class DocumentTab : ObservableObject
     public List<AnnotationItem> Annotations { get; set; } = [];
     public string AnnotationsStatus { get; set; } = "";
     public bool AnnotationsStale { get; set; } = true;
+    public UndoManager UndoManager { get; } = new();
+    public bool IsContinuousHighlight { get; set; }
 
     // Sidebar state preserved across tab switches
     public SidebarPanel SelectedPanel { get; set; } = SidebarPanel.Thumbnails;

@@ -40,10 +40,10 @@ public interface IPdfDocument : IAsyncDisposable
     Task<IReadOnlyList<PdfAnnotation>> GetAnnotationsAsync(int pageIndex, int priority, CancellationToken ct = default);
 
     /// <summary>Adds a text markup annotation covering <paramref name="lineRects"/> (one rect per text line).</summary>
-    Task AddMarkupAsync(int pageIndex, AnnotationKind kind, IReadOnlyList<RectD> lineRects, AnnotationColor color, CancellationToken ct = default);
+    Task<PdfAnnotation> AddMarkupAsync(int pageIndex, AnnotationKind kind, IReadOnlyList<RectD> lineRects, AnnotationColor color, CancellationToken ct = default);
 
     /// <summary>Adds a sticky note whose icon's top-left corner is at <paramref name="position"/>.</summary>
-    Task AddNoteAsync(int pageIndex, PointD position, string contents, AnnotationColor color, CancellationToken ct = default);
+    Task<PdfAnnotation> AddNoteAsync(int pageIndex, PointD position, string contents, AnnotationColor color, CancellationToken ct = default);
 
     Task SetAnnotationColorAsync(int pageIndex, int annotationIndex, AnnotationColor color, CancellationToken ct = default);
 
@@ -52,7 +52,7 @@ public interface IPdfDocument : IAsyncDisposable
     Task RemoveAnnotationAsync(int pageIndex, int annotationIndex, CancellationToken ct = default);
 
     /// <summary>Writes the document (with changes) to <paramref name="path"/>, which must not be the open file.</summary>
-    Task SaveCopyAsync(string path, CancellationToken ct = default);
+    Task SaveCopyAsync(string path, IProgress<double>? progress = null, CancellationToken ct = default);
 
     Task<DocumentInfo> GetInfoAsync(CancellationToken ct = default);
 

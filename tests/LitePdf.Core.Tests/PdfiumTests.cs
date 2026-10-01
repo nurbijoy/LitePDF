@@ -132,8 +132,12 @@ public sealed class PdfiumTests
             var text = await doc.GetTextAsync(page, RenderPriority.Interactive);
             int start = text.Text.IndexOf("Chapter 4", StringComparison.Ordinal);
             rects = text.GetRangeRects(start, start + 9);
-            await doc.AddMarkupAsync(page, AnnotationKind.Highlight, rects, AnnotationColor.Yellow);
-            await doc.AddNoteAsync(page, new PointD(0.5, 0.5), "Remember this", AnnotationColor.Orange);
+            var markup = await doc.AddMarkupAsync(page, AnnotationKind.Highlight, rects, AnnotationColor.Yellow);
+            Assert.Equal(AnnotationKind.Highlight, markup.Kind);
+            Assert.Equal(AnnotationColor.Yellow, markup.Color);
+            var noteAnnot = await doc.AddNoteAsync(page, new PointD(0.5, 0.5), "Remember this", AnnotationColor.Orange);
+            Assert.Equal(AnnotationKind.Note, noteAnnot.Kind);
+            Assert.Equal("Remember this", noteAnnot.Contents);
             await doc.RenderAsync(page, 200, 150, 0, null, RenderFlags.Annotations, RenderPriority.Visible); // generates appearances
             await doc.SaveCopyAsync(saved);
         }
@@ -171,6 +175,29 @@ public sealed class PdfiumTests
         string path = Samples.TextPdf();
         await using var doc = await PdfiumDocument.OpenAsync(path);
         await Assert.ThrowsAsync<InvalidOperationException>(() => doc.SaveCopyAsync(path));
+    }
+
+    private sealed class ListProgress<T> : IProgress<T>
+    {
+        private readonly List<T> _items = [];
+        private readonly object _lock = new();
+        public void Report(T value) { lock (_lock) _items.Add(value); }
+        public IReadOnlyList<T> Snapshot() { lock (_lock) return _items.ToArray(); }
+    }
+
+    [Fact]
+    public async Task SaveCopyAsync_reports_progress()
+    {
+        string source = Samples.TextPdf(), saved = Samples.TempPath();
+        var progress = new ListProgress<double>();
+        await using (var doc = await PdfiumDocument.OpenAsync(source))
+        {
+            await doc.SaveCopyAsync(saved, progress);
+        }
+        Assert.True(File.Exists(saved));
+        var values = progress.Snapshot();
+        Assert.NotEmpty(values);
+        Assert.Equal(1.0, values.Last());
     }
 
     [Fact]

@@ -101,6 +101,8 @@ public partial class MainWindow
         {
             SaveActiveTabState();
             _activeTab.IsActive = false;
+            _activeTab.UndoManager.Changed -= UpdateUndoRedoState;
+            _activeTab.IsContinuousHighlight = _vm.IsContinuousHighlight;
             if (_session is not null)
             {
                 _session.DirtyChanged -= OnSessionDirtyChanged;
@@ -118,6 +120,10 @@ public partial class MainWindow
         _session = tab.Session;
         _vm.ActiveTab = tab;
         tab.IsActive = true;
+
+        tab.UndoManager.Changed += UpdateUndoRedoState;
+        _vm.IsContinuousHighlight = tab.IsContinuousHighlight;
+        UpdateUndoRedoState();
 
         tab.Session.DirtyChanged += OnSessionDirtyChanged;
         tab.Session.PageInvalidated += OnSessionPageInvalidated;
@@ -338,6 +344,10 @@ public partial class MainWindow
         _vm.IsDirty = false;
         _vm.CanSave = false;
         _vm.CanAnnotate = false;
+        _vm.CanUndo = false;
+        _vm.CanRedo = false;
+        _vm.IsContinuousHighlight = false;
+        UpdateUndoRedoState();
         _vm.IsScanBannerVisible = false;
         _vm.TextSourceText = "";
         _vm.PageCount = 0;
@@ -484,10 +494,18 @@ public partial class MainWindow
         }
 
         _vm.BusyText = "Saving…";
+        _vm.BusyProgress = 0;
+        _vm.BusyProgressText = "0%";
+        _vm.HasBusyProgress = true;
         _vm.IsBusy = true;
+        var progress = new Progress<double>(fraction =>
+        {
+            _vm.BusyProgress = fraction;
+            _vm.BusyProgressText = $"{fraction * 100:0}%";
+        });
         try
         {
-            await tab.Session.SaveAsync(target);
+            await tab.Session.SaveAsync(target, progress);
             tab.Title = tab.Session.DisplayName;
             tab.IsDirty = tab.Session.IsDirty;
             if (ReferenceEquals(_activeTab, tab))
@@ -514,6 +532,7 @@ public partial class MainWindow
         finally
         {
             _vm.IsBusy = false;
+            _vm.HasBusyProgress = false;
         }
     }
 
