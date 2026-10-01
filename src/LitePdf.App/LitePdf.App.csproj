@@ -11,7 +11,7 @@
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
     <TieredPGO>true</TieredPGO>
-    <Version>1.1.0</Version>
+
 
     <!-- Shown by Explorer, the taskbar, Start menu and the installer. -->
     <ApplicationIcon>Assets\LitePDF.ico</ApplicationIcon>
@@ -34,4 +34,36 @@
     <ProjectReference Include="..\LitePdf.Ocr\LitePdf.Ocr.csproj" />
   </ItemGroup>
 
+  <Target Name="AutoIncrementBuildVersion" BeforeTargets="GetAssemblyVersion">
+    <PropertyGroup>
+      <VersionFile>$(MSBuildProjectDirectory)\version.txt</VersionFile>
+    </PropertyGroup>
+
+    <ReadLinesFromFile File="$(VersionFile)" Condition="Exists('$(VersionFile)')">
+      <Output TaskParameter="Lines" PropertyName="_StoredVer" />
+    </ReadLinesFromFile>
+
+    <PropertyGroup>
+      <_StoredVer>$([System.String]::Copy('$(_StoredVer)').Trim())</_StoredVer>
+      <_StoredVer Condition="'$(_StoredVer)' == ''">1.0</_StoredVer>
+
+      <_FileMajor>$(_StoredVer.Split('.')[0])</_FileMajor>
+      <_FileMinor Condition="$(_StoredVer.Contains('.'))">$(_StoredVer.Split('.')[1])</_FileMinor>
+      <_FileMinor Condition="'$(_FileMinor)' == ''">0</_FileMinor>
+
+      <_CurrentVersion>$(_FileMajor).$(_FileMinor)</_CurrentVersion>
+
+      <_NextMinor Condition="'$(NoIncrement)' != 'true'">$([MSBuild]::Add($(_FileMinor), 1))</_NextMinor>
+      <_NextMinor Condition="'$(NoIncrement)' == 'true'">$(_FileMinor)</_NextMinor>
+      <_NextVersion>$(_FileMajor).$(_NextMinor)</_NextVersion>
+
+      <Version>$(_CurrentVersion).0</Version>
+      <AssemblyVersion>$(_CurrentVersion).0.0</AssemblyVersion>
+      <FileVersion>$(_CurrentVersion).0.0</FileVersion>
+      <InformationalVersion>$(_CurrentVersion)</InformationalVersion>
+    </PropertyGroup>
+
+    <WriteLinesToFile File="$(VersionFile)" Lines="$(_NextVersion)" Overwrite="true" Condition="'$(NoIncrement)' != 'true'" />
+    <Message Importance="High" Text="[Build Version] $(_CurrentVersion) (next: $(_NextVersion))" />
+  </Target>
 </Project>

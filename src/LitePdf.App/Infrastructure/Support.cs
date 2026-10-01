@@ -27,7 +27,10 @@ public static class AppInfo
             ? product
             : "LitePDF";
 
-    public static string Version { get; } = Self.GetName().Version?.ToString(3) ?? "1.0";
+    public static string Version { get; } =
+        Self.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion is { Length: > 0 } info
+            ? info.Split('+')[0]
+            : (Self.GetName().Version?.ToString(2) ?? "1.0");
 }
 
 public static class Log

@@ -16,7 +16,13 @@
 #define AppExe "LitePDF.exe"
 
 #ifndef AppVersion
-  #define AppVersion "1.2.0"
+  #if FileExists("..\src\LitePdf.App\version.txt")
+    #define VersionFile FileOpen("..\src\LitePdf.App\version.txt")
+    #define AppVersion Trim(FileRead(VersionFile))
+    #expr FileClose(VersionFile)
+  #else
+    #define AppVersion "1.2"
+  #endif
 #endif
 #ifndef SourceDir
   #define SourceDir "..\publish"
